@@ -32,6 +32,40 @@ def test_env_example_and_contract_have_the_same_settings():
     assert set(contract["settings"]) == set(_env_example())
 
 
+def test_contract_limits_match_non_embedding_runtime_settings():
+    from decimal import Decimal
+
+    from openai_compatible_bridge.core.cost_tracking import (
+        CostConfigError,
+        _parse_budget_limit,
+        _parse_positive_int,
+    )
+    from openai_compatible_bridge.main import SUPPORTED_TASK_TYPES
+    from openai_compatible_bridge.providers.ollama import _ollama_think_from_env
+
+    settings = _contract()["settings"]
+    assert set(settings["VERTEX_TASK_TYPE_DEFAULT"]["values"]) == SUPPORTED_TASK_TYPES
+    assert settings["OLLAMA_THINK"]["case_insensitive"] is True
+    for value in settings["OLLAMA_THINK"]["values"]:
+        _ollama_think_from_env(value)
+        _ollama_think_from_env(value.upper())
+
+    assert settings["COST_SHORT_WINDOW_SECONDS"] == {"type": "integer", "min": 1}
+    assert settings["COST_SHORT_WINDOW_LIMIT_USD"]["type"] == "budget"
+    assert settings["COST_DAILY_LIMIT_USD"]["type"] == "budget"
+    assert _parse_budget_limit("unlimited", "test") is None
+    assert _parse_budget_limit("1.25", "test") == Decimal("1.25")
+    try:
+        _parse_budget_limit("0", "test")
+    except CostConfigError:
+        pass
+    else:
+        raise AssertionError("runtime budget parser accepted zero")
+    assert _parse_positive_int("1", "test") == 1
+    assert settings["COST_LEDGER_BACKEND"]["case_insensitive"] is True
+    assert settings["STRUCTURED_OUTPUT_REPAIR_MODELS"]["max_items"] == 3
+
+
 def test_embedding_runtime_limits_are_declared_in_the_source_contract():
     settings = _contract()["settings"]
     assert settings["EMBEDDINGS_QUEUE_TIMEOUT_SECONDS"] == {
