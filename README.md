@@ -189,7 +189,7 @@ Ollama Cloud는 strict structured output을 보장하지 않으므로 repair는 
 Claude Code / Claude Desktop 연결용 Anthropic Messages ingress다. 요청은 `openai_compatible_bridge/anthropic_ingress.py`에서 OpenAI-shape으로 번역된 뒤 기존 registry 라우팅 + forecast budget gate를 그대로 탄다. upstream은 바뀌지 않는다.
 
 * 인증: `Authorization: Bearer <BRIDGE_API_KEY>` 또는 `x-api-key: <BRIDGE_API_KEY>`. 키가 비어 있으면 강제하지 않는다 (기존 ingress와 동일).
-* `system`(string|list), `tools`(`input_schema`→JSON Schema), `tool_choice`(`auto`/`any`/`tool`/`none`), `stop_sequences`, `temperature`/`top_p`, `stream` 지원. `thinking` 블록은 무시하고, image/document 등 미디어 블록은 400으로 거부한다.
+* `system`(string|list), `tools`(`input_schema`→JSON Schema), `tool_choice`(`auto`/`any`/`tool`/`none`), `stop_sequences`, `temperature`/`top_p`, `stream` 지원. Claude Code의 `output_config.effort`(`low`/`medium`/`high`/`xhigh`/`max`)는 `openai_compat` provider에 `reasoning_effort`로 전달한다. 지원 단계는 선택한 OpenCode 모델과 해당 OpenAI-compatible endpoint에 따라 다르다. `thinking` 대화 이력 블록은 무시하고, image/document 등 미디어 블록은 400으로 거부한다.
 * tool 호출 가능 provider: Vertex, Foundry(`PROVIDER_TOOL_SUPPORT`). Ollama는 `tools` 포함 시 400. Vertex function calling(`functionDeclarations`/`functionResponse`, id 합성 `call_<name>_<idx>`)은 `providers/vertex.py`가 담당하고, tool 포함 스트림은 buffered 단일 이벤트로 반환한다.
 * 스트리밍은 Anthropic SSE(`message_start`/`content_block_delta`/`message_delta`/`message_stop`)이며 `[DONE]`을 보내지 않는다. `message_start`의 usage는 0으로 시작하고 최종 `message_delta`에 실제값을 싣는다.
 * `count_tokens`는 제공하지 않는다 (없으면 client가 추정으로 fallback).

@@ -1312,6 +1312,8 @@ def _chat_completions_stream(
                 elif resolved_config is not None:
                     if provider == "foundry":
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
+                    elif provider == "openai_compat" and payload.reasoning_effort is not None:
+                        stream_kwargs["reasoning_effort"] = payload.reasoning_effort
                     stream_kwargs["resolved_config"] = resolved_config
                 async def events():
                     async for event in chat_client.stream_chat(**stream_kwargs):
@@ -1581,6 +1583,8 @@ async def create_chat_completions(
                 generate_kwargs["parallel_tool_calls"] = payload.parallel_tool_calls
             if provider == "foundry":
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
+            elif provider == "openai_compat" and payload.reasoning_effort is not None:
+                generate_kwargs["reasoning_effort"] = payload.reasoning_effort
             if provider in {"vertex", "foundry", "openai_compat"}:
                 generate_kwargs["resolved_config"] = _chat_cfg
                 result = await chat_client.generate(**generate_kwargs)
@@ -1662,6 +1666,8 @@ def _anthropic_generate_kwargs(
         generate_kwargs["tools"] = params["tools"]
     if params["tool_choice"] is not None:
         generate_kwargs["tool_choice"] = params["tool_choice"]
+    if provider == "openai_compat" and params["reasoning_effort"] is not None:
+        generate_kwargs["reasoning_effort"] = params["reasoning_effort"]
     if provider == "foundry":
         generate_kwargs["reasoning_effort"] = None
     if provider in {"vertex", "foundry", "openai_compat"}:

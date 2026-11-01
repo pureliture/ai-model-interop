@@ -281,6 +281,18 @@ def parse_anthropic_chat_params(payload: Any) -> dict[str, Any]:
     ):
         raise AnthropicBadRequest("stop_sequences must be a string or an array of strings.")
 
+    output_config = payload.get("output_config")
+    if output_config is not None and not isinstance(output_config, dict):
+        raise AnthropicBadRequest("output_config must be an object.")
+    reasoning_effort = (output_config or {}).get("effort")
+    if reasoning_effort is not None and (
+        not isinstance(reasoning_effort, str)
+        or reasoning_effort not in {"low", "medium", "high", "xhigh", "max"}
+    ):
+        raise AnthropicBadRequest(
+            "output_config.effort must be one of: low, medium, high, xhigh, max."
+        )
+
     stream = payload.get("stream", False)
     if not isinstance(stream, bool):
         raise AnthropicBadRequest("stream must be a boolean.")
@@ -291,6 +303,7 @@ def parse_anthropic_chat_params(payload: Any) -> dict[str, Any]:
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
+        "reasoning_effort": reasoning_effort,
         "stop": stop,
         "stream": stream,
         "tools": anthropic_tools_to_openai(payload.get("tools")),

@@ -129,6 +129,7 @@ class OpenAICompatChatClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
+        reasoning_effort: str | None = None,
         stream: bool,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -152,6 +153,8 @@ class OpenAICompatChatClient:
             body["tool_choice"] = tool_choice
         if parallel_tool_calls is not None:
             body["parallel_tool_calls"] = parallel_tool_calls
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
         return body
 
     async def generate(
@@ -168,6 +171,7 @@ class OpenAICompatChatClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
+        reasoning_effort: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         base_url = _resolve_base_url(resolved_config)
@@ -186,6 +190,7 @@ class OpenAICompatChatClient:
             tools=tools,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
+            reasoning_effort=reasoning_effort,
             stream=False,
         )
         try:
@@ -245,6 +250,7 @@ class OpenAICompatChatClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
+        reasoning_effort: str | None = None,
         **_: Any,
     ):
         from openai_compatible_bridge.providers.vertex import _coerce_openai_usage, _extract_message_text
@@ -265,6 +271,7 @@ class OpenAICompatChatClient:
             tools=tools,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
+            reasoning_effort=reasoning_effort,
             stream=True,
         )
         stream_context = self.http.stream("POST", f"{base_url}/chat/completions", headers=headers, json=body)
