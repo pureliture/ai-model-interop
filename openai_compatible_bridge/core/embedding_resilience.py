@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from .env_limits import LIMITS
+
 sleep = asyncio.sleep
 _NON_RETRYABLE_CODES = {"budget_exceeded", "cost_config_error", "cost_tracking_unavailable"}
 
@@ -82,15 +84,19 @@ class EmbeddingRetryPolicy:
             attempts = int(env.get("EMBEDDINGS_RETRY_MAX_ATTEMPTS", "4"))
         except ValueError:
             raise ValueError("EMBEDDINGS_RETRY_MAX_ATTEMPTS must be an integer") from None
-        if not 1 <= attempts <= 8:
+        attempt_limits = LIMITS["EMBEDDINGS_RETRY_MAX_ATTEMPTS"]
+        if not attempt_limits["min"] <= attempts <= attempt_limits["max"]:
             raise ValueError("EMBEDDINGS_RETRY_MAX_ATTEMPTS must be within 1..8")
-        initial = _seconds(env, "EMBEDDINGS_RETRY_INITIAL_DELAY_SECONDS", "1", 0.01, 30)
-        maximum = _seconds(env, "EMBEDDINGS_RETRY_MAX_DELAY_SECONDS", "8", 0.01, 60)
+        initial_spec = LIMITS["EMBEDDINGS_RETRY_INITIAL_DELAY_SECONDS"]
+        max_spec = LIMITS["EMBEDDINGS_RETRY_MAX_DELAY_SECONDS"]
+        timeout_spec = LIMITS["EMBEDDINGS_RETRY_TIMEOUT_SECONDS"]
+        initial = _seconds(env, "EMBEDDINGS_RETRY_INITIAL_DELAY_SECONDS", "1", initial_spec["min"], initial_spec["max"])
+        maximum = _seconds(env, "EMBEDDINGS_RETRY_MAX_DELAY_SECONDS", "8", max_spec["min"], max_spec["max"])
         if maximum < initial:
             raise ValueError("EMBEDDINGS_RETRY_MAX_DELAY_SECONDS must cover the initial delay")
         return cls(
             max_attempts=attempts, initial_delay=initial, max_delay=maximum,
-            timeout=_seconds(env, "EMBEDDINGS_RETRY_TIMEOUT_SECONDS", "30", 0.1, 300),
+            timeout=_seconds(env, "EMBEDDINGS_RETRY_TIMEOUT_SECONDS", "30", timeout_spec["min"], timeout_spec["max"]),
         )
 
     async def post(

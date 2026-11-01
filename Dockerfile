@@ -16,6 +16,7 @@ RUN uv sync --frozen --no-dev --no-editable
 
 # Step 3: 애플리케이션 소스 코드 복사 (509 KB)
 COPY openai_compatible_bridge /app/openai_compatible_bridge
+COPY contracts/bridge-env-contract.json /app/contracts/bridge-env-contract.json
 
 # Step 4: 메타데이터 ARG 및 LABEL (의존성 레이어 캐시 파괴 방지를 위해 하단 배치)
 ARG NEURONS_SOURCE_COMMIT=""
