@@ -49,7 +49,7 @@ from openai_compatible_bridge.providers.vertex import (
 JETBRAINS_AI_BASE_URL = os.getenv("JETBRAINS_AI_BASE_URL", "https://ingrazzio-cloud-prod.labs.jb.gg").strip().rstrip("/")
 JETBRAINS_AI_TOKEN = os.getenv("JETBRAINS_AI_TOKEN", "").strip()
 HTTP_TIMEOUT_SECONDS = float(
-    os.getenv("JETBRAINS_AI_HTTP_TIMEOUT_SECONDS", os.getenv("HTTP_TIMEOUT_SECONDS", "60"))
+    (os.getenv("JETBRAINS_AI_HTTP_TIMEOUT_SECONDS") or os.getenv("HTTP_TIMEOUT_SECONDS") or "60")
 )
 
 # 프로토콜 상수
@@ -66,10 +66,10 @@ JETBRAINS_GOOGLE_PATH_PREFIX = "/v1beta1/projects/jetbrains-grazie/locations/glo
 GRAZIE_AGENT_HEADER = '{"name":"junie:cli","version":" "}'
 
 
-def _grazie_headers(llm_model: str) -> dict[str, str]:
+def _grazie_headers(llm_model: str, token: str) -> dict[str, str]:
     """Grazie Gateway 라우팅 헤더를 생성한다."""
     headers = {
-        "Authorization": f"Bearer {JETBRAINS_AI_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Grazie-Agent": GRAZIE_AGENT_HEADER,
         "X-LLM-Model": llm_model,
@@ -178,7 +178,7 @@ class JetBrainsChatClient:
                 "JETBRAINS_AI_TOKEN is not configured.",
                 code="provider_config_error",
             )
-        return _grazie_headers(self._llm_model_header(protocol))
+        return _grazie_headers(self._llm_model_header(protocol), self.token)
 
     @staticmethod
     def _build_openai_request_body(
@@ -493,7 +493,7 @@ class JetBrainsChatClient:
             raise VertexAPIError(502, f"Invalid JSON from JetBrains: {exc}", code="bad_gateway") from exc
 
         if protocol == JETBRAINS_GOOGLE_PROTOCOL:
-            result = _google_response_result(payload)
+            return _google_response_result(payload)
         elif protocol == JETBRAINS_ANTHROPIC_PROTOCOL:
             # Anthropic response → OpenAI format
             content = payload.get("content", [])

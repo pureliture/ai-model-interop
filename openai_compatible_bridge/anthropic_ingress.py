@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 ANTHROPIC_VERSION = "2023-06-01"
 
 # tool 호출을 지원하는 provider (live 기준).
-PROVIDER_TOOL_SUPPORT = {"vertex": True, "foundry": True, "openai_compatible": True, "jetbrains": True, "ollama": False}
+PROVIDER_TOOL_SUPPORT = {"vertex": True, "foundry": True, "openai_compat": True, "openai_compatible": True, "jetbrains": True, "ollama": False}
 
 # Desktop validator용 기본 context window. 레지스트리 alias별
 # `context_length` 키로 override한다 (정확한 값은 운영자가 기입).

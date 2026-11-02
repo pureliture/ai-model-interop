@@ -12,7 +12,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
 
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("vertex", "ollama", "foundry", "openai_compatible", "jetbrains")
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("vertex", "ollama", "foundry", "openai_compat", "openai_compatible", "jetbrains")
 
 
 def _count(value: Any) -> int | None:
@@ -195,7 +195,7 @@ def parse_usage_for_provider(provider: str | None, payload: Any, endpoint: str) 
         return parse_ollama_usage(payload, endpoint)
     if provider == "foundry":
         return parse_foundry_usage(payload, endpoint)
-    if provider == "openai_compatible":
+    if provider in {"openai_compat", "openai_compatible"}:
         return parse_openai_compat_usage(payload, endpoint)
     if provider == "jetbrains":
         return parse_foundry_usage(payload, endpoint)
@@ -216,6 +216,7 @@ PROVIDER_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "vertex": ("chat", "embeddings", "rerank"),
     "ollama": ("chat",),
     "foundry": ("chat",),
+    "openai_compat": ("chat",),
     "openai_compatible": ("chat",),
     "jetbrains": ("chat",),
 }
@@ -278,7 +279,7 @@ def map_http_error_for_provider(provider: str | None, response: Any) -> Any:
             response.status_code, "Ollama request failed",
             code=str(response.status_code),
         )
-    if provider == "openai_compatible":
+    if provider in {"openai_compat", "openai_compatible"}:
         from openai_compatible_bridge.providers.vertex import VertexAPIError
 
         try:

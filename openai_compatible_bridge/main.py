@@ -563,7 +563,7 @@ def _install_cost_clients(app: FastAPI) -> None:
         ("vertex_client", "vertex"), ("vertex_chat_client", "vertex"),
         ("vertex_rerank_client", "vertex"), ("ollama_chat_client", "ollama"),
         ("foundry_chat_client", "foundry"),
-        ("openai_compatible_chat_client", "openai_compatible"),
+        ("openai_compatible_chat_client", "openai_compat"),
         ("jetbrains_chat_client", "jetbrains"),
     ):
         client = getattr(app.state, name, None)
@@ -1088,7 +1088,7 @@ def _select_chat_client(request: Request, provider: str) -> Any:
         return request.app.state.foundry_chat_client
     if provider == "jetbrains":
         return request.app.state.jetbrains_chat_client
-    if provider == "openai_compatible":
+    if provider in {"openai_compat", "openai_compatible"}:
         return request.app.state.openai_compatible_chat_client
     return request.app.state.vertex_chat_client
 
@@ -1339,7 +1339,7 @@ def _chat_completions_stream(
                 elif resolved_config is not None:
                     if provider == "foundry":
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
-                    elif provider == "openai_compatible" and payload.reasoning_effort is not None:
+                    elif provider in {"openai_compat", "openai_compatible"} and payload.reasoning_effort is not None:
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
                     stream_kwargs["resolved_config"] = resolved_config
                 async def events():
@@ -1543,6 +1543,8 @@ async def create_chat_completions(
             )
 
     provider = (_chat_cfg or {}).get("provider", "vertex")
+    if provider == "openai_compatible":
+        provider = "openai_compat"
     provider_model = (_chat_cfg or {}).get("provider_model", payload.model)
     chat_client = _select_chat_client(request, provider)
 
@@ -1581,7 +1583,7 @@ async def create_chat_completions(
             messages,
             ctx,
             provider_model=provider_model,
-            resolved_config=_chat_cfg if provider in {"vertex", "foundry", "openai_compatible"} else None,
+            resolved_config=_chat_cfg if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"} else None,
             provider=provider,
         )
 
@@ -1610,9 +1612,9 @@ async def create_chat_completions(
                 generate_kwargs["parallel_tool_calls"] = payload.parallel_tool_calls
             if provider == "foundry":
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
-            elif provider == "openai_compatible" and payload.reasoning_effort is not None:
+            elif provider in {"openai_compat", "openai_compatible"} and payload.reasoning_effort is not None:
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
-            if provider in {"vertex", "foundry", "openai_compatible"}:
+            if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"}:
                 generate_kwargs["resolved_config"] = _chat_cfg
                 result = await chat_client.generate(**generate_kwargs)
                 result_usage = _chat_usage_from_mapping(result.get("usage", {}))
@@ -1693,11 +1695,11 @@ def _anthropic_generate_kwargs(
         generate_kwargs["tools"] = params["tools"]
     if params["tool_choice"] is not None:
         generate_kwargs["tool_choice"] = params["tool_choice"]
-    if provider == "openai_compatible" and params["reasoning_effort"] is not None:
+    if provider in {"openai_compat", "openai_compatible"} and params["reasoning_effort"] is not None:
         generate_kwargs["reasoning_effort"] = params["reasoning_effort"]
     if provider == "foundry":
         generate_kwargs["reasoning_effort"] = None
-    if provider in {"vertex", "foundry", "openai_compatible"}:
+    if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"}:
         generate_kwargs["resolved_config"] = resolved_config
     return generate_kwargs
 
@@ -1882,6 +1884,8 @@ async def create_anthropic_messages(
         provider_model = (cfg or {}).get("provider_model", params["model"])
 
     provider = (cfg or {}).get("provider", "vertex")
+    if provider == "openai_compatible":
+        provider = "openai_compat"
     chat_client = _select_chat_client(request, provider)
 
     if params["tools"] is not None and not PROVIDER_TOOL_SUPPORT.get(provider, False):
@@ -1919,7 +1923,7 @@ async def create_anthropic_messages(
                 error_type="api_error",
             )
         return _anthropic_stream(
-            chat_client, params, ctx, provider_model, cfg if provider in {"vertex", "foundry", "openai_compatible"} else None, provider
+            chat_client, params, ctx, provider_model, cfg if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"} else None, provider
         )
 
     try:

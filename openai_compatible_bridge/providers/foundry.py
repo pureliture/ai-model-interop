@@ -25,7 +25,7 @@ from openai_compatible_bridge.providers.vertex import (
 FOUNDRY_BASE_URL = os.getenv("FOUNDRY_BASE_URL", "").strip().rstrip("/")
 FOUNDRY_TOKEN = os.getenv("FOUNDRY_TOKEN", "").strip()
 HTTP_TIMEOUT_SECONDS = float(
-    os.getenv("FOUNDRY_HTTP_TIMEOUT_SECONDS", os.getenv("HTTP_TIMEOUT_SECONDS", "60"))
+    (os.getenv("FOUNDRY_HTTP_TIMEOUT_SECONDS") or os.getenv("HTTP_TIMEOUT_SECONDS") or "60")
 )
 
 FOUNDRY_OPENAI_PROTOCOL = "openai_chat_completions"

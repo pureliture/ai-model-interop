@@ -81,6 +81,12 @@ class AsyncCostAccounting:
             raise ValueError("cost execution bounds must be positive")
         self.config = config
         self.billing = dict(billing)
+        legacy = self.billing.get("openai_compat")
+        modern = self.billing.get("openai_compatible")
+        if legacy is not None and modern is not None and legacy != modern:
+            raise CostConfigError("conflicting openai compatibility billing classifications")
+        if modern is not None and legacy is None:
+            self.billing["openai_compat"] = modern
         self.ledger = ledger
         self.gate = None
         if config is not None and ledger is not None and pricing is not None:
