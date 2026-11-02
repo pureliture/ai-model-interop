@@ -54,9 +54,10 @@ from openai_compatible_bridge.core.cost_tracking import (
     NormalizedUsage,
 )
 from openai_compatible_bridge.providers.foundry import FoundryChatClient
+from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient, validate_jetbrains_parameters
 from openai_compatible_bridge.providers.ollama import OllamaChatClient
-from openai_compatible_bridge.providers.openai_compat import (
-    OpenAICompatChatClient,
+from openai_compatible_bridge.providers.openai_compatible import (
+    OpenAICompatibleChatClient,
     _resolve_extra_headers,
 )
 from openai_compatible_bridge.providers.vertex import (
@@ -86,10 +87,11 @@ SUPPORTED_TASK_TYPES = {
 VERTEX_TASK_TYPE_DEFAULT = os.getenv("VERTEX_TASK_TYPE_DEFAULT", "RETRIEVAL_DOCUMENT")
 BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY")
 _COMPAT_MODEL_IDS: set[str] = set()
+_JETBRAINS_MODEL_IDS: set[str] = set()
 _COMPAT_MODEL_META: dict[str, dict[str, Any]] = {}
 
 
-def _openai_compat_base_config() -> dict[str, Any]:
+def _openai_compatible_base_config() -> dict[str, Any]:
     cfg: dict[str, Any] = {}
     template = MODEL_REGISTRY.get("compat:*")
     if isinstance(template, dict):
@@ -108,7 +110,7 @@ def _openai_compat_base_config() -> dict[str, Any]:
             val = (os.getenv(env_name) or "").strip()
             if val:
                 cfg["api_key"] = val
-    cfg.setdefault("provider", "openai_compat")
+    cfg.setdefault("provider", "openai_compatible")
     cfg.setdefault("kind", "chat")
     cfg.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
     return cfg
@@ -118,8 +120,8 @@ def _compat_model_config(model_id: str) -> dict[str, Any] | None:
     upstream = model_id[len(OPENAI_COMPAT_DYNAMIC_MODEL_PREFIX):].strip()
     if not upstream:
         return None
-    cfg = dict(_openai_compat_base_config())
-    cfg["provider"] = "openai_compat"
+    cfg = dict(_openai_compatible_base_config())
+    cfg["provider"] = "openai_compatible"
     cfg["kind"] = "chat"
     cfg["provider_model"] = upstream
     cfg.setdefault("context_length", DEFAULT_CONTEXT_LENGTH)
@@ -153,12 +155,12 @@ model_config = _main_model_config
 
 
 def _main_allowed_models() -> set[str]:
-    return _vertex_allowed_models() | _COMPAT_MODEL_IDS
+    return _vertex_allowed_models() | _COMPAT_MODEL_IDS | _JETBRAINS_MODEL_IDS
 
 
 allowed_models = _main_allowed_models
 def _discover_compat_models() -> None:
-    base = _openai_compat_base_config()
+    base = _openai_compatible_base_config()
     url = (base.get("base_url") or "").rstrip("/")
     if not url:
         return
@@ -222,6 +224,7 @@ _vertex_mod.MODEL_REGISTRY_RELOAD_HOOK = _reload_compat_discovery
 ALLOWED_MODELS = _main_allowed_models()
 OLLAMA_DYNAMIC_MODEL_PREFIX = "ollama:"
 OPENAI_COMPAT_DYNAMIC_MODEL_PREFIX = "compat:"
+JETBRAINS_DYNAMIC_MODEL_PREFIX = "jetbrains:"
 OPENAI_COMPAT_DEFAULT_BASE_URL = os.getenv("OPENAI_COMPAT_BASE_URL", "").strip().rstrip("/")
 OPENAI_COMPAT_DEFAULT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "").strip()
 MODEL_LIST_INCLUDE = os.getenv("MODEL_LIST_INCLUDE", "").strip()
@@ -267,7 +270,7 @@ def _resolve_chat_model(model: str) -> tuple[dict[str, Any] | None, JSONResponse
                 code="invalid_model",
                 param="model",
             )
-        base_cfg = _openai_compat_base_config()
+        base_cfg = _openai_compatible_base_config()
         if not base_cfg.get("base_url"):
             return None, openai_error_response(
                 message="OPENAI_COMPAT_BASE_URL (or compat:* base_url) is not configured for dynamic compat models.",
@@ -277,10 +280,30 @@ def _resolve_chat_model(model: str) -> tuple[dict[str, Any] | None, JSONResponse
                 param="model",
             )
         resolved = dict(base_cfg)
-        resolved["provider"] = "openai_compat"
+        resolved["provider"] = "openai_compatible"
         resolved["kind"] = "chat"
         resolved["provider_model"] = provider_model
         return resolved, None
+
+    if model not in current_allowed_models() and model.startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX):
+        provider_model = model[len(JETBRAINS_DYNAMIC_MODEL_PREFIX):].strip()
+        if not provider_model:
+            return None, openai_error_response(
+                message="Dynamic JetBrains model must use the form 'jetbrains:<native-model>'.",
+                status_code=400,
+                error_type="invalid_request_error",
+                code="invalid_model",
+                param="model",
+            )
+        base_cfg = {
+            "provider": "jetbrains",
+            "kind": "chat",
+            "provider_model": provider_model,
+        }
+        token = (os.getenv("JETBRAINS_AI_TOKEN") or "").strip()
+        if token:
+            base_cfg["api_key"] = token
+        return base_cfg, None
 
     if model not in current_allowed_models():
         return None, openai_error_response(
@@ -540,7 +563,8 @@ def _install_cost_clients(app: FastAPI) -> None:
         ("vertex_client", "vertex"), ("vertex_chat_client", "vertex"),
         ("vertex_rerank_client", "vertex"), ("ollama_chat_client", "ollama"),
         ("foundry_chat_client", "foundry"),
-        ("openai_compat_chat_client", "openai_compat"),
+        ("openai_compatible_chat_client", "openai_compat"),
+        ("jetbrains_chat_client", "jetbrains"),
     ):
         client = getattr(app.state, name, None)
         if client is not None and hasattr(client, "http"):
@@ -901,6 +925,7 @@ async def lifespan(app: FastAPI):
     app.state.vertex_client = VertexEmbeddingClient()
     app.state.vertex_chat_client = VertexChatClient()
     app.state.vertex_rerank_client = VertexRerankClient()
+    app.state.jetbrains_chat_client = JetBrainsChatClient()
     app.state.cost_accounting = build_async_cost_accounting(os.environ)
     _install_cost_clients(app)
     try:
@@ -1061,8 +1086,10 @@ def _select_chat_client(request: Request, provider: str) -> Any:
         return request.app.state.ollama_chat_client
     if provider == "foundry":
         return request.app.state.foundry_chat_client
-    if provider == "openai_compat":
-        return request.app.state.openai_compat_chat_client
+    if provider == "jetbrains":
+        return request.app.state.jetbrains_chat_client
+    if provider in {"openai_compat", "openai_compatible"}:
+        return request.app.state.openai_compatible_chat_client
     return request.app.state.vertex_chat_client
 
 
@@ -1312,7 +1339,7 @@ def _chat_completions_stream(
                 elif resolved_config is not None:
                     if provider == "foundry":
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
-                    elif provider == "openai_compat" and payload.reasoning_effort is not None:
+                    elif provider in {"openai_compat", "openai_compatible"} and payload.reasoning_effort is not None:
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
                     stream_kwargs["resolved_config"] = resolved_config
                 async def events():
@@ -1516,6 +1543,24 @@ async def create_chat_completions(
             )
 
     provider = (_chat_cfg or {}).get("provider", "vertex")
+    if provider == "jetbrains" and (payload.reasoning_effort is not None or payload.reasoning is not None):
+        param = "reasoning_effort" if payload.reasoning_effort is not None else "reasoning"
+        return openai_error_response(
+            message=f"{param} is not supported for JetBrains.", status_code=400,
+            error_type="invalid_request_error", code="unsupported_parameter", param=param,
+        )
+    if provider == "jetbrains":
+        try:
+            validate_jetbrains_parameters(
+                (_chat_cfg or {}).get("protocol") or "openai_responses",
+                parallel_tool_calls=payload.parallel_tool_calls,
+                response_format=payload.response_format,
+            )
+        except VertexAPIError as exc:
+            return openai_error_response(message=exc.message, status_code=exc.status_code,
+                                         error_type=map_vertex_status_to_openai_type(exc.status_code), code=exc.code)
+    if provider == "openai_compatible":
+        provider = "openai_compat"
     provider_model = (_chat_cfg or {}).get("provider_model", payload.model)
     chat_client = _select_chat_client(request, provider)
 
@@ -1554,7 +1599,7 @@ async def create_chat_completions(
             messages,
             ctx,
             provider_model=provider_model,
-            resolved_config=_chat_cfg if provider in {"vertex", "foundry", "openai_compat"} else None,
+            resolved_config=_chat_cfg if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"} else None,
             provider=provider,
         )
 
@@ -1583,9 +1628,9 @@ async def create_chat_completions(
                 generate_kwargs["parallel_tool_calls"] = payload.parallel_tool_calls
             if provider == "foundry":
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
-            elif provider == "openai_compat" and payload.reasoning_effort is not None:
+            elif provider in {"openai_compat", "openai_compatible"} and payload.reasoning_effort is not None:
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
-            if provider in {"vertex", "foundry", "openai_compat"}:
+            if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"}:
                 generate_kwargs["resolved_config"] = _chat_cfg
                 result = await chat_client.generate(**generate_kwargs)
                 result_usage = _chat_usage_from_mapping(result.get("usage", {}))
@@ -1666,11 +1711,11 @@ def _anthropic_generate_kwargs(
         generate_kwargs["tools"] = params["tools"]
     if params["tool_choice"] is not None:
         generate_kwargs["tool_choice"] = params["tool_choice"]
-    if provider == "openai_compat" and params["reasoning_effort"] is not None:
+    if provider in {"openai_compat", "openai_compatible"} and params["reasoning_effort"] is not None:
         generate_kwargs["reasoning_effort"] = params["reasoning_effort"]
     if provider == "foundry":
         generate_kwargs["reasoning_effort"] = None
-    if provider in {"vertex", "foundry", "openai_compat"}:
+    if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"}:
         generate_kwargs["resolved_config"] = resolved_config
     return generate_kwargs
 
@@ -1812,7 +1857,7 @@ async def create_anthropic_messages(
                 status_code=400,
                 error_type="invalid_request_error",
             )
-        base_cfg = _openai_compat_base_config()
+        base_cfg = _openai_compatible_base_config()
         if not base_cfg.get("base_url"):
             return anthropic_error_response(
                 message="OPENAI_COMPAT_BASE_URL (or compat:* base_url) is not configured for dynamic compat models.",
@@ -1820,9 +1865,23 @@ async def create_anthropic_messages(
                 error_type="invalid_request_error",
             )
         cfg = dict(base_cfg)
-        cfg["provider"] = "openai_compat"
+        cfg["provider"] = "openai_compatible"
         cfg["kind"] = "chat"
         cfg["provider_model"] = native
+        provider_model = native
+    elif params["model"] not in current_allowed_models() and params["model"].startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX):
+        native = params["model"][len(JETBRAINS_DYNAMIC_MODEL_PREFIX):].strip()
+        if not native:
+            return anthropic_error_response(
+                message="Dynamic JetBrains model must use the form 'jetbrains:<native-model>'.",
+                status_code=400,
+                error_type="invalid_request_error",
+            )
+        cfg = {
+            "provider": "jetbrains",
+            "kind": "chat",
+            "provider_model": native,
+        }
         provider_model = native
     elif params["model"] not in current_allowed_models():
         return anthropic_error_response(
@@ -1841,6 +1900,13 @@ async def create_anthropic_messages(
         provider_model = (cfg or {}).get("provider_model", params["model"])
 
     provider = (cfg or {}).get("provider", "vertex")
+    if provider == "jetbrains" and params["reasoning_effort"] is not None:
+        return anthropic_error_response(
+            message="output_config.effort is not supported for JetBrains.",
+            status_code=400, error_type="invalid_request_error",
+        )
+    if provider == "openai_compatible":
+        provider = "openai_compat"
     chat_client = _select_chat_client(request, provider)
 
     if params["tools"] is not None and not PROVIDER_TOOL_SUPPORT.get(provider, False):
@@ -1878,7 +1944,7 @@ async def create_anthropic_messages(
                 error_type="api_error",
             )
         return _anthropic_stream(
-            chat_client, params, ctx, provider_model, cfg if provider in {"vertex", "foundry", "openai_compat"} else None, provider
+            chat_client, params, ctx, provider_model, cfg if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"} else None, provider
         )
 
     try:
@@ -2027,7 +2093,8 @@ def _lifespan_with_factories(
     rerank_client_factory: Any,
     ollama_chat_client_factory: Any,
     foundry_chat_client_factory: Any,
-    openai_compat_chat_client_factory: Any | None = None,
+    openai_compatible_chat_client_factory: Any | None = None,
+    jetbrains_chat_client_factory: Any | None = None,
     cost_accounting_factory: Any,
 ) -> Any:
     @asynccontextmanager
@@ -2037,10 +2104,15 @@ def _lifespan_with_factories(
         app.state.vertex_rerank_client = rerank_client_factory()
         app.state.ollama_chat_client = ollama_chat_client_factory()
         app.state.foundry_chat_client = foundry_chat_client_factory()
-        app.state.openai_compat_chat_client = (
-            openai_compat_chat_client_factory()
-            if openai_compat_chat_client_factory is not None
-            else OpenAICompatChatClient()
+        app.state.openai_compatible_chat_client = (
+            openai_compatible_chat_client_factory()
+            if openai_compatible_chat_client_factory is not None
+            else OpenAICompatibleChatClient()
+        )
+        app.state.jetbrains_chat_client = (
+            jetbrains_chat_client_factory()
+            if jetbrains_chat_client_factory is not None
+            else JetBrainsChatClient()
         )
         app.state.cost_accounting = cost_accounting_factory()
         _install_cost_clients(app)
@@ -2058,7 +2130,8 @@ def _lifespan_with_factories(
             await app.state.vertex_rerank_client.close()
             await app.state.ollama_chat_client.close()
             await app.state.foundry_chat_client.close()
-            await app.state.openai_compat_chat_client.close()
+            await app.state.openai_compatible_chat_client.close()
+            await app.state.jetbrains_chat_client.close()
 
     return managed_lifespan
 
@@ -2073,7 +2146,8 @@ def create_app(
     rerank_client_factory: Any | None = None,
     ollama_chat_client_factory: Any | None = None,
     foundry_chat_client_factory: Any | None = None,
-    openai_compat_chat_client_factory: Any | None = None,
+    openai_compatible_chat_client_factory: Any | None = None,
+    jetbrains_chat_client_factory: Any | None = None,
     cost_accounting_factory: Any | None = None,
 ) -> FastAPI:
     embedding_factory = embedding_client_factory or (lambda: VertexEmbeddingClient())
@@ -2081,7 +2155,8 @@ def create_app(
     rerank_factory = rerank_client_factory or (lambda: VertexRerankClient())
     ollama_factory = ollama_chat_client_factory or (lambda: OllamaChatClient())
     foundry_factory = foundry_chat_client_factory or (lambda: FoundryChatClient())
-    openai_compat_factory = openai_compat_chat_client_factory
+    openai_compatible_factory = openai_compatible_chat_client_factory
+    jetbrains_factory = jetbrains_chat_client_factory
     cost_factory = cost_accounting_factory or (lambda: build_async_cost_accounting(os.environ))
     bridge_app = FastAPI(
         title="openai-compatible-bridge",
@@ -2092,7 +2167,8 @@ def create_app(
             rerank_client_factory=rerank_factory,
             ollama_chat_client_factory=ollama_factory,
             foundry_chat_client_factory=foundry_factory,
-            openai_compat_chat_client_factory=openai_compat_factory,
+            openai_compatible_chat_client_factory=openai_compatible_factory,
+            jetbrains_chat_client_factory=jetbrains_factory,
             cost_accounting_factory=cost_factory,
         ),
     )

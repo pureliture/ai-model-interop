@@ -243,7 +243,7 @@ def test_embedding_retries_recheck_real_postgres_admission(tmp_path, pg_dsn, mon
     app = create_app(
         embedding_client_factory=lambda: provider, chat_client_factory=NoCallProvider,
         rerank_client_factory=NoCallProvider, ollama_chat_client_factory=NoCallProvider,
-        foundry_chat_client_factory=NoCallProvider, openai_compat_chat_client_factory=NoCallProvider,
+        foundry_chat_client_factory=NoCallProvider, openai_compatible_chat_client_factory=NoCallProvider,
         cost_accounting_factory=lambda: accounting,
     )
     with TestClient(app) as client:

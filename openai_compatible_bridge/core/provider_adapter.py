@@ -12,7 +12,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
 
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("vertex", "ollama", "foundry", "openai_compat")
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("vertex", "ollama", "foundry", "openai_compat", "openai_compatible", "jetbrains")
 
 
 def _count(value: Any) -> int | None:
@@ -195,8 +195,10 @@ def parse_usage_for_provider(provider: str | None, payload: Any, endpoint: str) 
         return parse_ollama_usage(payload, endpoint)
     if provider == "foundry":
         return parse_foundry_usage(payload, endpoint)
-    if provider == "openai_compat":
+    if provider in {"openai_compat", "openai_compatible"}:
         return parse_openai_compat_usage(payload, endpoint)
+    if provider == "jetbrains":
+        return parse_foundry_usage(payload, endpoint)
     return None
 
 
@@ -215,6 +217,8 @@ PROVIDER_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "ollama": ("chat",),
     "foundry": ("chat",),
     "openai_compat": ("chat",),
+    "openai_compatible": ("chat",),
+    "jetbrains": ("chat",),
 }
 
 # endpoint별 usage 스키마 (adapter가 소유하는 과금 차원 선언).
@@ -264,7 +268,7 @@ def pricing_fallbacks(model: str) -> tuple[str, ...]:
 def map_http_error_for_provider(provider: str | None, response: Any) -> Any:
     """provider별 HTTP 에러 매핑. lazy import로 순환 참조를 피한다."""
     if provider == "foundry":
-        from openai_compatible_bridge.providers.foundry import _parse_foundry_error
+        from openai_compatible_bridge.core.transforms import _parse_foundry_error
 
         return _parse_foundry_error(response)
     if provider == "ollama":
@@ -275,7 +279,7 @@ def map_http_error_for_provider(provider: str | None, response: Any) -> Any:
             response.status_code, "Ollama request failed",
             code=str(response.status_code),
         )
-    if provider == "openai_compat":
+    if provider in {"openai_compat", "openai_compatible"}:
         from openai_compatible_bridge.providers.vertex import VertexAPIError
 
         try:
@@ -286,6 +290,21 @@ def map_http_error_for_provider(provider: str | None, response: Any) -> Any:
         if isinstance(err, str):
             err = {"message": err}
         message = err.get("message") or response.text or "OpenAI-compat request failed"
+        code = err.get("code") or err.get("type") or str(response.status_code)
+        return VertexAPIError(
+            response.status_code, message=str(message), code=str(code), raw=error_payload
+        )
+    if provider == "jetbrains":
+        from openai_compatible_bridge.providers.vertex import VertexAPIError
+
+        try:
+            error_payload = response.json()
+        except Exception:
+            error_payload = {"error": {"message": response.text}}
+        err = error_payload.get("error", {}) if isinstance(error_payload, dict) else {}
+        if isinstance(err, str):
+            err = {"message": err}
+        message = err.get("message") or response.text or "JetBrains request failed"
         code = err.get("code") or err.get("type") or str(response.status_code)
         return VertexAPIError(
             response.status_code, message=str(message), code=str(code), raw=error_payload

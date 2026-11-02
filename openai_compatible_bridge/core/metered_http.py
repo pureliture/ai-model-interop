@@ -68,11 +68,15 @@ def _observe_usage(provider: str | None, payload: Any, endpoint: str) -> Normali
     known provider가 None을 반환해도 legacy로 재시도해 기존 동작을 보존한다.
     완전 제거는 legacy _raw_usage/_StreamUsage 호출자가 없을 때 별도 작업으로.
     """
+    if (provider == "jetbrains" and endpoint == "chat" and isinstance(payload, dict)
+            and payload.get("status") == "incomplete" and payload.get("error") is None):
+        usage = _object(payload.get("usage"))
+        return _chat_usage(usage, "input_tokens", "output_tokens")
     if provider is not None:
         parsed = parse_usage_for_provider(provider, payload, endpoint)
         if parsed is not None:
             return parsed
-        if provider in ("vertex", "ollama", "foundry", "openai_compat"):
+        if provider in ("vertex", "ollama", "foundry", "openai_compat", "openai_compatible", "jetbrains"):
             return _raw_usage(payload, endpoint)
     return _raw_usage(payload, endpoint)
 
@@ -152,10 +156,19 @@ class _StreamUsage:
         if not isinstance(payload, dict):
             self._discard()
             return
+        event_type = payload.get("type")
+        if event_type == "response.incomplete":
+            response = _object(payload.get("response"))
+            if payload.get("error") is not None or response.get("error") is not None or response.get("status") != "incomplete":
+                self._discard()
+                return
+            self._usage = _observe_usage(self.provider, {"usage": response.get("usage")}, self.endpoint)
+            if self._usage is None:
+                self._discard()
+            return
         if _is_error(payload):
             self._discard()
             return
-        event_type = payload.get("type")
         if event_type == "message_start":
             usage = _object(_object(payload.get("message")).get("usage"))
             self._input_tokens = _count(usage.get("input_tokens"))

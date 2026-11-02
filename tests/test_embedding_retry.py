@@ -429,7 +429,7 @@ def test_real_asgi_provider_path_uses_shared_capacity(api, monkeypatch, capacity
         app = main.create_app(
             embedding_client_factory=lambda: provider, chat_client_factory=NoCallProvider,
             rerank_client_factory=NoCallProvider, ollama_chat_client_factory=NoCallProvider,
-            foundry_chat_client_factory=NoCallProvider, openai_compat_chat_client_factory=NoCallProvider,
+            foundry_chat_client_factory=NoCallProvider, openai_compatible_chat_client_factory=NoCallProvider,
             cost_accounting_factory=DisabledCostAccounting,
         )
         model = "text-embedding-005" if api == "predict" else "gemini-embedding-2"

@@ -1557,7 +1557,11 @@ class BudgetGate:
         now = self._now_fn()
         short_cutoff = now - timedelta(seconds=self.config.short_window_seconds or 0)
         day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-        provider_filter = (provider.strip().lower(),) if provider and provider.strip() else self._tracked_provider_filter()
+        requested_provider = provider.strip().lower() if provider and provider.strip() else None
+        if requested_provider in {"openai_compat", "openai_compatible"}:
+            provider_filter = ("openai_compat", "openai_compatible")
+        else:
+            provider_filter = (requested_provider,) if requested_provider else self._tracked_provider_filter()
         short_spend = self.ledger.sum_estimated_since(
             short_cutoff,
             providers=provider_filter,
@@ -1584,7 +1588,7 @@ class BudgetGate:
             "unhealthy_reason": self.health.reason,
             "currency": "USD",
             "tracked_providers": list(self.config.tracked_providers) or ["all"],
-            "view_provider": provider_filter[0] if provider_filter and len(provider_filter) == 1 else None,
+            "view_provider": requested_provider if requested_provider else (provider_filter[0] if provider_filter and len(provider_filter) == 1 else None),
             "short_window": {
                 **short_summary.as_dict(),
                 "seconds": self.config.short_window_seconds,

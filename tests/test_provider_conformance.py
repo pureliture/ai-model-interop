@@ -26,11 +26,11 @@ from openai_compatible_bridge.core.provider_adapter import (
 )
 from openai_compatible_bridge.providers.foundry import FoundryChatClient
 from openai_compatible_bridge.providers.ollama import OllamaChatClient
-from openai_compatible_bridge.providers.openai_compat import OpenAICompatChatClient
+from openai_compatible_bridge.providers.openai_compatible import OpenAICompatibleChatClient
 from openai_compatible_bridge.providers.vertex import VertexChatClient
 
-PROVIDERS = ["vertex", "ollama", "foundry", "openai_compat"]
-TOOLS_SUPPORTED = {"vertex": True, "ollama": False, "foundry": True, "openai_compat": True}
+PROVIDERS = ["vertex", "ollama", "foundry", "openai_compatible"]
+TOOLS_SUPPORTED = {"vertex": True, "ollama": False, "foundry": True, "openai_compatible": True}
 
 
 class FakeTokens:
@@ -85,8 +85,8 @@ def _make_client(provider: str, handler: Any) -> Any:
         client = OllamaChatClient(base_url="http://ollama.test")
         client.http = httpx.AsyncClient(transport=transport)
         return client
-    if provider == "openai_compat":
-        client = OpenAICompatChatClient()
+    if provider == "openai_compatible":
+        client = OpenAICompatibleChatClient()
         client.http = httpx.AsyncClient(transport=transport)
         return client
     client = FoundryChatClient(base_url="http://foundry.test/chat/completions", token="test")
@@ -97,7 +97,7 @@ def _make_client(provider: str, handler: Any) -> Any:
 def _go_kwargs() -> dict[str, Any]:
     return {
         "resolved_config": {
-            "provider": "openai_compat",
+            "provider": "openai_compatible",
             "provider_model": "glm-5.3",
             "base_url": "https://go.test/v1",
             "api_key": "go-key",
@@ -130,7 +130,7 @@ def _nonstream_kwargs(provider: str) -> dict[str, Any]:
         return {"resolved_config": {"api": "generateContent", "location": "us-central1"}}
     if provider == "foundry":
         return {"resolved_config": {"protocol": "openai_chat_completions"}}
-    if provider == "openai_compat":
+    if provider == "openai_compatible":
         return _go_kwargs()
     return {}
 
@@ -189,7 +189,7 @@ def test_conformance_tool_roundtrip_or_capability(provider: str) -> None:
             "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 5, "totalTokenCount": 8},
         }
         extra_kwargs: dict[str, Any] = {"resolved_config": {"api": "generateContent", "location": "us-central1"}}
-    elif provider == "openai_compat":
+    elif provider == "openai_compatible":
         tool_payload = {
             "choices": [
                 {
