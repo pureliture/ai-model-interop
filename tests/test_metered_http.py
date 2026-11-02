@@ -661,3 +661,44 @@ def test_post_parse_and_record_failures_do_not_change_upstream_response():
             await client.aclose()
 
     asyncio.run(run())
+
+def test_jetbrains_incomplete_stream_records_actual_usage():
+    from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient
+    async def run():
+        accounting = Accounting()
+        wire = sse({'type': 'response.incomplete', 'response': {'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'}, 'usage': {'input_tokens': 100, 'output_tokens': 50, 'total_tokens': 150}}}) + b'data: [DONE]\n\n'
+        client = await wrap(JetBrainsChatClient(base_url='https://example.test', token='synthetic'), accounting, lambda _: httpx.Response(200, stream=ByteStream(wire)), 'jetbrains')
+        try:
+            _ = [event async for event in client.stream_chat(model='m', messages=MESSAGES, resolved_config={'protocol': 'openai_responses'})]
+            assert accounting.records[0][1] == NormalizedUsage(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+        finally:
+            await client.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('response', [
+    {'status': 'incomplete', 'usage': {'input_tokens': 100}},
+    {'status': 'incomplete', 'usage': {'input_tokens': True, 'output_tokens': 50}},
+    {'status': 'incomplete', 'error': {'message': 'failed'}, 'usage': {'input_tokens': 100, 'output_tokens': 50}},
+    {'status': 'failed', 'usage': {'input_tokens': 100, 'output_tokens': 50}},
+])
+def test_incomplete_invalid_usage_cannot_be_replaced_by_later_data(response):
+    observer = _StreamUsage('chat', 'jetbrains')
+    wire = sse({'type': 'response.incomplete', 'response': response}, {'usage': {'prompt_tokens': 1, 'completion_tokens': 1}})
+    for line in wire.decode().splitlines():
+        observer.feed_line(line)
+    assert observer.usage is None
+
+
+def test_jetbrains_incomplete_nonstream_records_actual_usage():
+    from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient
+    async def run():
+        accounting = Accounting()
+        payload = {'status': 'incomplete', 'output': [], 'incomplete_details': {'reason': 'max_output_tokens'}, 'usage': {'input_tokens': 100, 'output_tokens': 50, 'total_tokens': 150}}
+        client = await wrap(JetBrainsChatClient(base_url='https://example.test', token='synthetic'), accounting, lambda _: httpx.Response(200, json=payload), 'jetbrains')
+        try:
+            await client.generate(model='m', messages=MESSAGES, resolved_config={'protocol': 'openai_responses'})
+            assert accounting.records[0][1] == NormalizedUsage(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+        finally:
+            await client.close()
+    asyncio.run(run())

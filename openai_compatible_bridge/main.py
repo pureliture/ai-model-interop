@@ -54,7 +54,7 @@ from openai_compatible_bridge.core.cost_tracking import (
     NormalizedUsage,
 )
 from openai_compatible_bridge.providers.foundry import FoundryChatClient
-from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient
+from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient, validate_jetbrains_parameters
 from openai_compatible_bridge.providers.ollama import OllamaChatClient
 from openai_compatible_bridge.providers.openai_compatible import (
     OpenAICompatibleChatClient,
@@ -1549,6 +1549,16 @@ async def create_chat_completions(
             message=f"{param} is not supported for JetBrains.", status_code=400,
             error_type="invalid_request_error", code="unsupported_parameter", param=param,
         )
+    if provider == "jetbrains":
+        try:
+            validate_jetbrains_parameters(
+                (_chat_cfg or {}).get("protocol") or "openai_responses",
+                parallel_tool_calls=payload.parallel_tool_calls,
+                response_format=payload.response_format,
+            )
+        except VertexAPIError as exc:
+            return openai_error_response(message=exc.message, status_code=exc.status_code,
+                                         error_type=map_vertex_status_to_openai_type(exc.status_code), code=exc.code)
     if provider == "openai_compatible":
         provider = "openai_compat"
     provider_model = (_chat_cfg or {}).get("provider_model", payload.model)

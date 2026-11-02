@@ -83,6 +83,21 @@ def _grazie_headers(llm_model: str, token: str) -> dict[str, str]:
     return headers
 
 
+def validate_jetbrains_parameters(protocol: str, *, reasoning_effort: str | None = None,
+                                   parallel_tool_calls: bool | None = None,
+                                   response_format: dict[str, Any] | None = None) -> None:
+    if reasoning_effort is not None:
+        raise VertexAPIError(400, "reasoning_effort is not supported for JetBrains.", code="unsupported_parameter")
+    if protocol in {JETBRAINS_ANTHROPIC_PROTOCOL, JETBRAINS_GOOGLE_PROTOCOL} and parallel_tool_calls is not None:
+        raise VertexAPIError(400, "parallel_tool_calls is not supported for this JetBrains protocol.", code="unsupported_parameter")
+    if protocol == JETBRAINS_ANTHROPIC_PROTOCOL and response_format is not None:
+        raise VertexAPIError(400, "response_format is not supported for this JetBrains protocol.", code="unsupported_parameter")
+    if (protocol in {JETBRAINS_OPENAI_PROTOCOL, JETBRAINS_XAI_PROTOCOL}
+            and response_format is not None and response_format.get("type") == "json_schema"
+            and not isinstance(response_format.get("json_schema"), dict)):
+        raise VertexAPIError(400, "Invalid json_schema response format.", code="invalid_request_error")
+
+
 class JetBrainsChatClient:
     """OpenAI Chat Completions client for JetBrains Grazie Gateway.
 
@@ -407,12 +422,8 @@ class JetBrainsChatClient:
         parallel_tool_calls: bool | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
-        if reasoning_effort is not None:
-            raise VertexAPIError(400, "reasoning_effort is not supported for JetBrains.", code="unsupported_parameter")
-        if protocol in {JETBRAINS_ANTHROPIC_PROTOCOL, JETBRAINS_GOOGLE_PROTOCOL} and parallel_tool_calls is not None:
-            raise VertexAPIError(400, "parallel_tool_calls is not supported for this JetBrains protocol.", code="unsupported_parameter")
-        if protocol == JETBRAINS_ANTHROPIC_PROTOCOL and response_format is not None:
-            raise VertexAPIError(400, "response_format is not supported for this JetBrains protocol.", code="unsupported_parameter")
+        validate_jetbrains_parameters(protocol, reasoning_effort=reasoning_effort,
+                                     parallel_tool_calls=parallel_tool_calls, response_format=response_format)
         if protocol == JETBRAINS_OPENAI_PROTOCOL or protocol == JETBRAINS_XAI_PROTOCOL:
             return self._build_openai_request_body(
                 model=model,
