@@ -213,7 +213,10 @@ class JetBrainsChatClient:
             if format_type == "json_object":
                 body["text"] = {"format": {"type": "json_object"}}
             elif format_type == "json_schema":
-                body["text"] = {"format": response_format}
+                schema = response_format.get("json_schema")
+                if not isinstance(schema, dict):
+                    raise VertexAPIError(400, "Invalid json_schema response format.", code="invalid_request_error")
+                body["text"] = {"format": {**schema, "type": "json_schema"}}
         if tools is not None:
             grazie_tools: list[dict[str, Any]] = []
             for t in tools:
@@ -227,6 +230,8 @@ class JetBrainsChatClient:
                     }
                 )
             body["tools"] = grazie_tools
+        if parallel_tool_calls is not None:
+            body["parallel_tool_calls"] = parallel_tool_calls
         if tool_choice is not None:
             if isinstance(tool_choice, dict):
                 fn_dict = tool_choice.get("function")
@@ -402,6 +407,10 @@ class JetBrainsChatClient:
         parallel_tool_calls: bool | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
+        if protocol in {JETBRAINS_ANTHROPIC_PROTOCOL, JETBRAINS_GOOGLE_PROTOCOL} and parallel_tool_calls is not None:
+            raise VertexAPIError(400, "parallel_tool_calls is not supported for this JetBrains protocol.", code="unsupported_parameter")
+        if protocol == JETBRAINS_ANTHROPIC_PROTOCOL and response_format is not None:
+            raise VertexAPIError(400, "response_format is not supported for this JetBrains protocol.", code="unsupported_parameter")
         if protocol == JETBRAINS_OPENAI_PROTOCOL or protocol == JETBRAINS_XAI_PROTOCOL:
             return self._build_openai_request_body(
                 model=model,
@@ -492,6 +501,13 @@ class JetBrainsChatClient:
         except Exception as exc:
             raise VertexAPIError(502, f"Invalid JSON from JetBrains: {exc}", code="bad_gateway") from exc
 
+        if not isinstance(payload, dict) or payload.get("error") or payload.get("type") == "error" or payload.get("status") in {"failed", "cancelled"}:
+            raise VertexAPIError(502, "JetBrains returned an upstream error.", code="bad_gateway")
+        if protocol == JETBRAINS_ANTHROPIC_PROTOCOL and not isinstance(payload.get("content"), list):
+            raise VertexAPIError(502, "Malformed JetBrains Anthropic response.", code="bad_gateway")
+        if protocol in {JETBRAINS_OPENAI_PROTOCOL, JETBRAINS_XAI_PROTOCOL} and not isinstance(payload.get("output"), list):
+            raise VertexAPIError(502, "Malformed JetBrains Responses response.", code="bad_gateway")
+
         if protocol == JETBRAINS_GOOGLE_PROTOCOL:
             return _google_response_result(payload)
         elif protocol == JETBRAINS_ANTHROPIC_PROTOCOL:
@@ -518,7 +534,7 @@ class JetBrainsChatClient:
             return {
                 "text": "".join(text_parts) or None,
                 "tool_calls": tool_calls,
-                "finish_reason": "tool_calls" if tool_calls else "stop",
+                "finish_reason": "tool_calls" if tool_calls else (_map_finish_reason(payload.get("stop_reason")) or "stop"),
                 "usage": {
                     "prompt_tokens": int(usage.get("input_tokens", 0) or 0),
                     "completion_tokens": int(usage.get("output_tokens", 0) or 0),
@@ -545,7 +561,7 @@ class JetBrainsChatClient:
             return {
                 "text": text or None,
                 "tool_calls": tool_calls,
-                "finish_reason": "tool_calls" if tool_calls else (payload.get("status") or "stop"),
+                "finish_reason": "tool_calls" if tool_calls else (_map_finish_reason((payload.get("incomplete_details") or {}).get("reason")) or _map_finish_reason(payload.get("status")) or "stop"),
                 "usage": {
                     "prompt_tokens": int(usage.get("input_tokens", 0) or 0),
                     "completion_tokens": int(usage.get("output_tokens", 0) or 0),
@@ -570,133 +586,16 @@ class JetBrainsChatClient:
         reasoning_effort: str | None = None,
         **_: Any,
     ):
-        protocol = self._protocol(resolved_config)
-        llm_model = self._llm_model_header(protocol)
-        url = self._url_for_protocol(protocol, model=(resolved_config or {}).get("provider_model", model), stream=True)
-        headers = self._headers(protocol)
-        body = self._build_request_body(
-            protocol=protocol,
-            model=(resolved_config or {}).get("provider_model", model),
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop,
-            response_format=response_format,
-            reasoning_effort=reasoning_effort,
-            tools=tools,
-            tool_choice=tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
-            stream=True,
-        )
-        stream_context = self.http.stream("POST", url, headers=headers, json=body)
-        try:
-            try:
-                response = await stream_context.__aenter__()
-            except httpx.TimeoutException as exc:
-                raise VertexAPIError(504, f"JetBrains request timed out: {exc}", code="timeout") from exc
-            except httpx.RequestError as exc:
-                raise VertexAPIError(502, f"JetBrains connection error: {exc}", code="connection_error") from exc
+        # Both gateways use the same native protocol event formats. Reuse the
+        # established parser while keeping JetBrains URLs, headers and bodies.
+        from openai_compatible_bridge.providers.foundry import FoundryChatClient
 
-            if response.status_code >= 400:
-                try:
-                    await response.aread()
-                except Exception:
-                    pass
-                raise self.map_http_error(response)
-
-            if protocol == JETBRAINS_GOOGLE_PROTOCOL:
-                # Google streaming: parse SSE
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw = line[len("data:"):].strip()
-                    if raw == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(raw)
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    # Yield delta from Google response
-                    candidates = event.get("candidates", [])
-                    if candidates and isinstance(candidates[0], dict):
-                        content = candidates[0].get("content", {})
-                        parts = content.get("parts", []) if isinstance(content, dict) else []
-                        for part in parts:
-                            if isinstance(part, dict) and "text" in part:
-                                yield {
-                                    "delta_text": part["text"],
-                                    "delta_tool_calls": None,
-                                    "finish_reason": None,
-                                    "usage": None,
-                                }
-            elif protocol == JETBRAINS_ANTHROPIC_PROTOCOL:
-                # Anthropic streaming: parse SSE
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw = line[len("data:"):].strip()
-                    if raw == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(raw)
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    event_type = event.get("type", "")
-                    if event_type == "content_block_delta":
-                        delta = event.get("delta", {})
-                        if isinstance(delta, dict) and delta.get("type") == "text_delta":
-                            yield {
-                                "delta_text": delta.get("text", ""),
-                                "delta_tool_calls": None,
-                                "finish_reason": None,
-                                "usage": None,
-                            }
-                    elif event_type == "message_stop":
-                        yield {
-                            "delta_text": "",
-                            "delta_tool_calls": None,
-                            "finish_reason": "stop",
-                            "usage": None,
-                        }
-            else:
-                # OpenAI Responses streaming
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw = line[len("data:"):].strip()
-                    if raw == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(raw)
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    # Extract delta text from Responses API events
-                    event_type = event.get("type", "")
-                    if event_type == "response.output_text.delta":
-                        yield {
-                            "delta_text": event.get("delta", ""),
-                            "delta_tool_calls": None,
-                            "finish_reason": None,
-                            "usage": None,
-                        }
-                    elif event_type == "response.completed":
-                        usage = event.get("response", {}).get("usage", {})
-                        yield {
-                            "delta_text": "",
-                            "delta_tool_calls": None,
-                            "finish_reason": "stop",
-                            "usage": {
-                                "prompt_tokens": int(usage.get("input_tokens", 0) or 0),
-                                "completion_tokens": int(usage.get("output_tokens", 0) or 0),
-                                "total_tokens": int(usage.get("total_tokens", 0) or 0),
-                            },
-                        }
-        finally:
-            await stream_context.__aexit__(None, None, None)
+        native_model = (resolved_config or {}).get("provider_model", model)
+        async for event in FoundryChatClient.stream_chat(
+            self, model=native_model, messages=messages, max_tokens=max_tokens,
+            temperature=temperature, top_p=top_p, stop=stop,
+            response_format=response_format, resolved_config=resolved_config,
+            tools=tools, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
+            reasoning_effort=reasoning_effort, _require_complete=True,
+        ):
+            yield event
