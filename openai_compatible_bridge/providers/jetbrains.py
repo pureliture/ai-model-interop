@@ -407,6 +407,8 @@ class JetBrainsChatClient:
         parallel_tool_calls: bool | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
+        if reasoning_effort is not None:
+            raise VertexAPIError(400, "reasoning_effort is not supported for JetBrains.", code="unsupported_parameter")
         if protocol in {JETBRAINS_ANTHROPIC_PROTOCOL, JETBRAINS_GOOGLE_PROTOCOL} and parallel_tool_calls is not None:
             raise VertexAPIError(400, "parallel_tool_calls is not supported for this JetBrains protocol.", code="unsupported_parameter")
         if protocol == JETBRAINS_ANTHROPIC_PROTOCOL and response_format is not None:

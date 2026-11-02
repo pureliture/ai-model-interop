@@ -1543,6 +1543,12 @@ async def create_chat_completions(
             )
 
     provider = (_chat_cfg or {}).get("provider", "vertex")
+    if provider == "jetbrains" and (payload.reasoning_effort is not None or payload.reasoning is not None):
+        param = "reasoning_effort" if payload.reasoning_effort is not None else "reasoning"
+        return openai_error_response(
+            message=f"{param} is not supported for JetBrains.", status_code=400,
+            error_type="invalid_request_error", code="unsupported_parameter", param=param,
+        )
     if provider == "openai_compatible":
         provider = "openai_compat"
     provider_model = (_chat_cfg or {}).get("provider_model", payload.model)
@@ -1884,6 +1890,11 @@ async def create_anthropic_messages(
         provider_model = (cfg or {}).get("provider_model", params["model"])
 
     provider = (cfg or {}).get("provider", "vertex")
+    if provider == "jetbrains" and params["reasoning_effort"] is not None:
+        return anthropic_error_response(
+            message="output_config.effort is not supported for JetBrains.",
+            status_code=400, error_type="invalid_request_error",
+        )
     if provider == "openai_compatible":
         provider = "openai_compat"
     chat_client = _select_chat_client(request, provider)

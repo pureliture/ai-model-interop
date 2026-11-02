@@ -87,6 +87,8 @@ class AsyncCostAccounting:
             raise CostConfigError("conflicting openai compatibility billing classifications")
         if modern is not None and legacy is None:
             self.billing["openai_compat"] = modern
+        if legacy is not None and modern is None:
+            self.billing["openai_compatible"] = legacy
         self.ledger = ledger
         self.gate = None
         if config is not None and ledger is not None and pricing is not None:

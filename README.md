@@ -266,6 +266,7 @@ JetBrains AI는 Grazie Gateway를 통해 OpenAI, Anthropic (Claude), xAI (Grok),
 * Base URL: `JETBRAINS_AI_BASE_URL` (기본값: `https://ingrazzio-cloud-prod.labs.jb.gg`)
 * 동적 모델: `jetbrains:<native-model>` prefix로 registry 없이 직접 호출 가능 (예: `jetbrains:gpt-5.4`)
 * 과금: `COST_PROVIDER_BILLING_JSON`에 `"jetbrains"` 키를 실제 계약(`subscription` 등)으로 분류한다.
+* reasoning override: JetBrains의 네 가지 프로토콜은 아직 검증된 변환 계약이 없으므로 OpenAI의 `reasoning_effort`/`reasoning` 및 Anthropic의 `output_config.effort` 요청을 스트리밍 시작과 upstream 호출 전에 HTTP 400으로 거부한다. 미지정 요청은 그대로 처리한다.
 
 ### Model Alias
 
