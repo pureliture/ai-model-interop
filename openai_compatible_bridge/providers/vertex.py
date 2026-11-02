@@ -35,7 +35,7 @@ MODEL_REGISTRY_RELOAD_HOOK = None
 _registry_mtime = 0.0
 
 _SUPPORTED_APIS = {"predict", "embedContent", "generateContent", "openapiChatCompletions", "rank"}
-_SUPPORTED_PROVIDERS = {"vertex", "ollama", "foundry", "openai_compat"}
+_SUPPORTED_PROVIDERS = {"vertex", "ollama", "foundry", "openai_compatible", "jetbrains"}
 _SUPPORTED_FOUNDRY_PROTOCOLS = {
     "openai_chat_completions",
     "anthropic_messages",
@@ -135,11 +135,11 @@ def _build_registry() -> dict[str, dict[str, Any]]:
             )
         if provider == "ollama" and cfg.get("kind", "chat") != "chat":
             raise ValueError("Ollama provider currently supports only kind='chat'")
-        if provider == "openai_compat":
+        if provider == "openai_compatible":
             if cfg.get("kind", "chat") != "chat":
                 raise ValueError("openai_compat provider currently supports only kind='chat'")
             if not isinstance(cfg.get("base_url"), str) or not cfg["base_url"].strip():
-                raise ValueError(f"Model '{model_id}' with provider='openai_compat' requires base_url.")
+                raise ValueError(f"Model '{model_id}' with provider='openai_compatible' requires base_url.")
             api_key = cfg.get("api_key")
             if api_key is not None and not isinstance(api_key, str):
                 raise ValueError(f"Model '{model_id}' api_key must be a string.")
@@ -220,7 +220,7 @@ def model_config(model: str) -> dict[str, Any] | None:
     cfg = dict(entry)
     provider = cfg.get("provider", "vertex")
     cfg["provider"] = provider
-    if provider in {"ollama", "foundry"}:
+    if provider in {"ollama", "foundry", "openai_compatible", "jetbrains"}:
         if "kind" not in cfg:
             cfg["kind"] = "chat"
         if "provider_model" not in cfg:

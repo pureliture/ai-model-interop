@@ -99,10 +99,10 @@ def _resolve_api_key(resolved_config: dict[str, Any] | None) -> str | None:
     return None
 
 
-class OpenAICompatChatClient:
+class OpenAICompatibleChatClient:
     """Alias별 base_url로 고정된 OpenAI /chat/completions 클라이언트."""
 
-    provider_name = "openai_compat"
+    provider_name = "openai_compatible"
 
     def __init__(self, *, timeout_seconds: float | None = None) -> None:
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds or HTTP_TIMEOUT_SECONDS))

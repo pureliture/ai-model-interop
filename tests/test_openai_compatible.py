@@ -1,4 +1,4 @@
-"""Generic OpenAI upstream provider (openai_compat) tests."""
+"""Generic OpenAI upstream provider (openai_compatible) tests."""
 
 from __future__ import annotations
 
@@ -11,17 +11,17 @@ from fastapi.testclient import TestClient
 
 import openai_compatible_bridge.providers.vertex as vertex_mod
 from openai_compatible_bridge.main import create_app
-from openai_compatible_bridge.providers.openai_compat import OpenAICompatChatClient
+from openai_compatible_bridge.providers.openai_compatible import OpenAICompatibleChatClient
 from openai_compatible_bridge.providers.vertex import VertexAPIError
 
 
-def _client(handler, *, env: dict[str, str] | None = None) -> OpenAICompatChatClient:
+def _client(handler, *, env: dict[str, str] | None = None) -> OpenAICompatibleChatClient:
     if env:
         import os
 
         for key, value in env.items():
             os.environ[key] = value
-    client = OpenAICompatChatClient()
+    client = OpenAICompatibleChatClient()
     client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return client
 
@@ -49,7 +49,7 @@ def test_generate_posts_to_alias_base_url_with_bearer_key():
                 messages=[{"role": "user", "content": "hi"}],
                 max_tokens=16,
                 resolved_config={
-                    "provider": "openai_compat",
+                    "provider": "openai_compatible",
                     "provider_model": "glm-5.3",
                     "base_url": "https://opencode.ai/inference/go/openai/v1/",
                     "api_key": "go-key",
@@ -101,7 +101,7 @@ def test_generate_reads_key_from_env_and_parses_tools(monkeypatch):
                 tools=[{"type": "function", "function": {"name": "bash"}}],
                 tool_choice="auto",
                 resolved_config={
-                    "provider": "openai_compat",
+                    "provider": "openai_compatible",
                     "provider_model": "glm-5.3",
                     "base_url": "https://go.test/v1",
                     "api_key_env": "OPENCODE_GO_API_KEY",
@@ -121,12 +121,12 @@ def test_missing_base_url_and_bad_scheme_fail_closed():
         client = _client(lambda request: httpx.Response(200, json={}))
         try:
             with pytest.raises(VertexAPIError) as excinfo:
-                await client.generate(model="m", messages=[], resolved_config={"provider": "openai_compat"})
+                await client.generate(model="m", messages=[], resolved_config={"provider": "openai_compatible"})
             assert excinfo.value.status_code == 503
             with pytest.raises(VertexAPIError):
                 await client.generate(
                     model="m", messages=[],
-                    resolved_config={"provider": "openai_compat", "base_url": "ftp://x"},
+                    resolved_config={"provider": "openai_compatible", "base_url": "ftp://x"},
                 )
         finally:
             await client.close()
@@ -146,7 +146,7 @@ def test_error_shape_unwrapped():
             with pytest.raises(VertexAPIError) as excinfo:
                 await client.generate(
                     model="nope", messages=[{"role": "user", "content": "x"}],
-                    resolved_config={"provider": "openai_compat", "base_url": "https://go.test/v1"},
+                    resolved_config={"provider": "openai_compatible", "base_url": "https://go.test/v1"},
                 )
             assert excinfo.value.status_code == 400
             assert excinfo.value.code == "model_not_found"
@@ -174,7 +174,7 @@ def test_stream_parses_deltas_and_usage():
                 event async for event in client.stream_chat(
                     model="glm-5.3",
                     messages=[{"role": "user", "content": "hi"}],
-                    resolved_config={"provider": "openai_compat", "base_url": "https://go.test/v1"},
+                    resolved_config={"provider": "openai_compatible", "base_url": "https://go.test/v1"},
                 )
             ]
         finally:
@@ -189,7 +189,7 @@ def test_stream_parses_deltas_and_usage():
 def _register_go_alias() -> dict:
     old = vertex_mod.MODEL_REGISTRY.copy()
     vertex_mod.MODEL_REGISTRY["go-test:glm"] = {
-        "provider": "openai_compat",
+        "provider": "openai_compatible",
         "kind": "chat",
         "provider_model": "glm-5.3",
         "base_url": "https://go.test/v1",
@@ -213,7 +213,7 @@ def _route_app(fake):
         rerank_client_factory=lambda: Fake(),
         ollama_chat_client_factory=lambda: Fake(),
         foundry_chat_client_factory=lambda: Fake(),
-        openai_compat_chat_client_factory=lambda: fake,
+        openai_compatible_chat_client_factory=lambda: fake,
         cost_accounting_factory=lambda: None,
     )
 
@@ -255,12 +255,12 @@ def test_route_chat_and_messages_through_go_alias():
         asyncio.run(fake.close())
 
 
-def test_registry_rejects_openai_compat_without_base_url(monkeypatch):
+def test_registry_rejects_openai_compatible_without_base_url(monkeypatch):
     import json as jsonlib
 
     monkeypatch.setenv(
         "MODEL_REGISTRY_JSON",
-        jsonlib.dumps({"bad:alias": {"provider": "openai_compat", "kind": "chat"}}),
+        jsonlib.dumps({"bad:alias": {"provider": "openai_compatible", "kind": "chat"}}),
     )
     with pytest.raises(ValueError, match="base_url"):
         vertex_mod._build_registry()
@@ -351,7 +351,7 @@ def test_pricing_compat_wildcard_fallback():
 
 def test_compat_base_config_merges_template_and_env(monkeypatch):
     import openai_compatible_bridge.main as bridge_main
-    from openai_compatible_bridge.providers.openai_compat import _resolve_extra_headers
+    from openai_compatible_bridge.providers.openai_compatible import _resolve_extra_headers
 
     monkeypatch.setattr(bridge_main, "MODEL_REGISTRY", {
         "compat:*": {
@@ -362,7 +362,7 @@ def test_compat_base_config_merges_template_and_env(monkeypatch):
         }
     })
     monkeypatch.setenv("GO_KEY", "secret-key")
-    cfg = bridge_main._openai_compat_base_config()
+    cfg = bridge_main._openai_compatible_base_config()
     assert cfg["base_url"] == "https://go.test/v1"
     assert cfg["api_key"] == "secret-key"
     assert cfg["extra_headers"] == {"x-opencode-session": "sid"}
@@ -382,7 +382,7 @@ def test_compat_model_config_and_allowed_models_use_discovered_ids():
     try:
         cfg = bridge_main.model_config("compat:glm-5.3")
         assert cfg is not None
-        assert cfg["provider"] == "openai_compat"
+        assert cfg["provider"] == "openai_compatible"
         assert cfg["provider_model"] == "glm-5.3"
         assert cfg["context_length"] == 131072
         obj = bridge_main._model_object("compat:glm-5.3")
@@ -401,7 +401,7 @@ def _tier_registry() -> dict:
     return {
         "compat:*": {
             "kind": "chat",
-            "provider": "openai_compat",
+            "provider": "openai_compatible",
             "base_url": "https://go.test/v1",
         },
         "compat:opus-model": {
@@ -459,7 +459,7 @@ def test_model_list_reports_context_window_for_claude_code(monkeypatch):
     registry = {
         "compat:*": {
             "kind": "chat",
-            "provider": "openai_compat",
+            "provider": "openai_compatible",
             "base_url": "https://go.test/v1",
         },
         "compat:big": {"context_length": 1000000, "max_tokens": 64000},
@@ -498,7 +498,7 @@ def test_registry_hot_reload_from_file(monkeypatch, tmp_path):
             {
                 "compat:hot": {
                     "kind": "chat",
-                    "provider": "openai_compat",
+                    "provider": "openai_compatible",
                     "base_url": "https://go.test/v1",
                     "display_name": "Hot",
                 }
@@ -518,7 +518,7 @@ def test_registry_hot_reload_from_file(monkeypatch, tmp_path):
             {
                 "compat:hot2": {
                     "kind": "chat",
-                    "provider": "openai_compat",
+                    "provider": "openai_compatible",
                     "base_url": "https://go.test/v1",
                     "display_name": "Hot2",
                 }
