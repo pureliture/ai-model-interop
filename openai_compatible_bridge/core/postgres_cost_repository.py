@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import os
 import threading
+import time
 import uuid
 import weakref
 from collections.abc import Iterator, Mapping
@@ -306,7 +307,7 @@ class PostgresCostRepository(ICostRepository):
         self._pool_dsn: str | None = None
         self._retired_pools: list[ConnectionPool] = []
         self._pool_lock = threading.Lock()
-        self._verify_at = 0.0
+        self._verify_at: float | None = None
         self._verify_dsn: str | None = None
         _TRACKED_REPOSITORIES.add(self)
 
@@ -371,7 +372,7 @@ class PostgresCostRepository(ICostRepository):
                         _ensure_transaction(conn)
                     except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn):
                         # schema 변경/복구 흔적이면 캐시를 버리고 다음 호출에서 재검증한다.
-                        self._verify_at = 0.0
+                        self._verify_at = None
                         raise
                     finally:
                         del self._local.connection
@@ -383,9 +384,11 @@ class PostgresCostRepository(ICostRepository):
     def _verify_schema_cached(self, conn: psycopg.Connection) -> None:
         """성공한 schema 검증만 TTL 동안 캐시한다. 실패는 캐시하지 않는다."""
         ttl = _schema_verify_ttl_seconds()
-        now = _utcnow().timestamp()
-        if ttl > 0 and self._verify_dsn == self._dsn and now - self._verify_at < ttl:
-            return
+        verified_at = self._verify_at
+        now = time.monotonic()
+        if ttl > 0 and verified_at is not None and self._verify_dsn == self._dsn:
+            if now - verified_at < ttl:
+                return
         _verify_schema(conn)
         self._verify_at = now
         self._verify_dsn = self._dsn
