@@ -11,6 +11,7 @@ from dataclasses import replace
 from functools import partial
 from typing import Any, Self
 
+from .env_limits import LIMITS
 from .cost_tracking import (
     BudgetGate,
     BudgetReservationContext,
@@ -351,7 +352,8 @@ def _admission_timeout_seconds(source: Mapping[str, str]) -> float:
         value = float(raw)
     except ValueError:
         raise CostConfigError("COST_ADMISSION_TIMEOUT_SECONDS must be a number") from None
-    if not 0.5 <= value <= 30:
+    spec = LIMITS["COST_ADMISSION_TIMEOUT_SECONDS"]
+    if not spec["min"] <= value <= spec["max"]:
         raise CostConfigError("COST_ADMISSION_TIMEOUT_SECONDS must be within 0.5..30")
     return value
 
@@ -365,7 +367,8 @@ def _admission_worker_count(source: Mapping[str, str]) -> int:
         value = int(raw)
     except ValueError:
         raise CostConfigError("COST_ADMISSION_WORKERS must be an integer") from None
-    if not 1 <= value <= 64:
+    spec = LIMITS["COST_ADMISSION_WORKERS"]
+    if not spec["min"] <= value <= spec["max"]:
         raise CostConfigError("COST_ADMISSION_WORKERS must be within 1..64")
     return value
 
