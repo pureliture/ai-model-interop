@@ -9,7 +9,7 @@ services:
       # 호스트(맥미니 등 도커망 밖)에서 디버깅하려면 8930으로 공개. 불필요하면 이 줄 삭제 가능.
       - "8930:80"
     environment:
-      VERTEX_PROJECT: ${VERTEX_PROJECT}
+      VERTEX_PROJECT: ${VERTEX_PROJECT:-}
       VERTEX_LOCATION: ${VERTEX_LOCATION:-us-central1}
       VERTEX_TASK_TYPE_DEFAULT: ${VERTEX_TASK_TYPE_DEFAULT:-RETRIEVAL_DOCUMENT}
       VERTEX_AUTO_TRUNCATE: ${VERTEX_AUTO_TRUNCATE:-true}
@@ -33,6 +33,7 @@ services:
       FOUNDRY_HTTP_TIMEOUT_SECONDS: ${FOUNDRY_HTTP_TIMEOUT_SECONDS:-}
       JETBRAINS_AI_BASE_URL: ${JETBRAINS_AI_BASE_URL:-https://ingrazzio-cloud-prod.labs.jb.gg}
       JETBRAINS_AI_TOKEN: ${JETBRAINS_AI_TOKEN:-}
+      JETBRAINS_AI_AUTH_MODE: ${JETBRAINS_AI_AUTH_MODE:-bearer}
       JETBRAINS_AI_HTTP_TIMEOUT_SECONDS: ${JETBRAINS_AI_HTTP_TIMEOUT_SECONDS:-}
       STRUCTURED_OUTPUT_REPAIR_ENABLED: ${STRUCTURED_OUTPUT_REPAIR_ENABLED:-false}
       STRUCTURED_OUTPUT_REPAIR_MODELS: ${STRUCTURED_OUTPUT_REPAIR_MODELS:-ollama:qwen3.5:cloud,ollama:gemma4:31b-cloud,ollama:glm-5.2:cloud}
@@ -56,7 +57,7 @@ services:
       COST_RETENTION_REQUEST_DAYS: ${COST_RETENTION_REQUEST_DAYS:-90}
       COST_RETENTION_AGGREGATE_MONTHS: ${COST_RETENTION_AGGREGATE_MONTHS:-13}
     volumes:
-      - ${VERTEX_SA_KEY_PATH:-./secrets/vertex-sa.json}:/app/secrets/vertex-sa.json:ro
+      - ${VERTEX_SA_KEY_DIR:-./secrets}:/app/secrets:ro
       # SQLite 호환용 mount 유지. postgres 선택 시 SQLite 파일을 열거나 삭제하지 않는다.
       - ${COST_LEDGER_DIR:-./data}:/data
     healthcheck:

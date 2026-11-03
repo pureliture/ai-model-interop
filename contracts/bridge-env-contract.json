@@ -1,6 +1,7 @@
 {
   "schema": "bridge-env-example-contract/v1",
   "settings": {
+    "VERTEX_SA_KEY_DIR": {"type": "path"},
     "GOOGLE_APPLICATION_CREDENTIALS": {"type": "credential_path"},
     "VERTEX_PROJECT": {"type": "string"},
     "VERTEX_LOCATION": {"type": "string"},
@@ -31,7 +32,9 @@
     "FOUNDRY_HTTP_TIMEOUT_SECONDS": {"type": "number", "min": 0.01, "max": 3600},
     "JETBRAINS_AI_BASE_URL": {"type": "url"},
     "JETBRAINS_AI_TOKEN": {"type": "secret"},
+    "JETBRAINS_AI_AUTH_MODE": {"type": "enum", "values": ["bearer", "jwt"], "case_insensitive": true},
     "JETBRAINS_AI_HTTP_TIMEOUT_SECONDS": {"type": "number", "min": 0.01, "max": 3600},
+    "BRIDGE_NETWORK": {"type": "string"},
     "COST_TRACKING_ENABLED": {"type": "boolean"},
     "COST_PROVIDER_BILLING_JSON": {"type": "json"},
     "COST_TRACKING_PROVIDERS": {"type": "csv"},

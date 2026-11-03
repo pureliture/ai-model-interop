@@ -44,6 +44,25 @@ def test_env_example_and_contract_have_the_same_settings():
     assert set(contract["settings"]) == set(_env_example())
 
 
+def test_optional_vertex_and_jetbrains_auth_settings_are_wired_to_compose():
+    values = _env_example()
+    contract = _contract()
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert values["GOOGLE_APPLICATION_CREDENTIALS"] == "/app/secrets/vertex-sa.json"
+    assert values["VERTEX_SA_KEY_DIR"] == "./secrets"
+    assert values["VERTEX_PROJECT"] == ""
+    assert values["JETBRAINS_AI_AUTH_MODE"] == "bearer"
+    assert values["BRIDGE_NETWORK"] == "bridge_default"
+    assert contract["settings"]["JETBRAINS_AI_AUTH_MODE"] == {
+        "type": "enum", "values": ["bearer", "jwt"], "case_insensitive": True,
+    }
+    assert "VERTEX_PROJECT: ${VERTEX_PROJECT:-}" in compose
+    assert "JETBRAINS_AI_AUTH_MODE: ${JETBRAINS_AI_AUTH_MODE:-bearer}" in compose
+    assert "${VERTEX_SA_KEY_DIR:-./secrets}:/app/secrets:ro" in compose
+    assert "name: ${BRIDGE_NETWORK:-bridge_default}" in compose
+
+
 def test_contract_limits_match_non_embedding_runtime_settings():
     from decimal import Decimal
 

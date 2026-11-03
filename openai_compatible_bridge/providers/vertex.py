@@ -301,13 +301,8 @@ def chunked(items: list[str], size: int) -> Iterable[list[str]]:
 class GoogleAccessTokenProvider:
     """서비스 계정(ADC) 기반 access token을 만료 전 선갱신하며 캐시한다."""
     def __init__(self) -> None:
-        creds, detected_project = google.auth.default(scopes=[CLOUD_PLATFORM_SCOPE])
-        self._creds = creds
-        self.project_id = VERTEX_PROJECT or detected_project
-        if not self.project_id:
-            raise RuntimeError(
-                "Google Cloud project를 결정할 수 없습니다. VERTEX_PROJECT 환경변수를 설정하거나 ADC project를 구성하세요."
-            )
+        self._creds: Any | None = None
+        self.project_id = VERTEX_PROJECT
         self._lock = threading.Lock()
         self._request = GoogleAuthRequest()
 
@@ -323,11 +318,42 @@ class GoogleAccessTokenProvider:
 
     def _get_token_sync(self) -> str:
         with self._lock:
+            if self._creds is None:
+                try:
+                    creds, detected_project = google.auth.default(scopes=[CLOUD_PLATFORM_SCOPE])
+                except Exception as exc:
+                    raise VertexAPIError(
+                        503,
+                        "Vertex AI authentication is unavailable. Configure Application Default Credentials (ADC) before using Vertex models.",
+                        code="vertex_auth_unavailable",
+                    ) from exc
+
+                project_id = VERTEX_PROJECT or detected_project
+                if not project_id:
+                    raise VertexAPIError(
+                        503,
+                        "Vertex AI project is unavailable. Set VERTEX_PROJECT or configure ADC with a project before using Vertex models.",
+                        code="vertex_project_unavailable",
+                    )
+                self._creds = creds
+                self.project_id = project_id
+
             if not self._valid_with_skew():
-                self._creds.refresh(self._request)
+                try:
+                    self._creds.refresh(self._request)
+                except Exception as exc:
+                    raise VertexAPIError(
+                        503,
+                        "Vertex AI authentication is unavailable. Check the configured Google credentials and try again.",
+                        code="vertex_auth_unavailable",
+                    ) from exc
             token = getattr(self._creds, "token", None)
             if not token:
-                raise RuntimeError("Google access token 발급에 실패했습니다.")
+                raise VertexAPIError(
+                    503,
+                    "Vertex AI authentication is unavailable because Google did not issue an access token.",
+                    code="vertex_auth_unavailable",
+                )
             return token
 
     async def get_token(self) -> str:
