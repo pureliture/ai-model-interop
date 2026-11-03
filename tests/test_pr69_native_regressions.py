@@ -96,11 +96,20 @@ def test_responses_json_schema_shape(stream):
     assert body['text']['format'] == {'type':'json_schema', **fmt['json_schema']}
 
 
-@pytest.mark.parametrize('protocol', ['anthropic_messages', 'google_generate_content'])
-def test_unsupported_parallel_option_rejected(protocol):
-    with pytest.raises(VertexAPIError) as exc:
-        run_client(protocol, {}, parallel_tool_calls=False)
-    assert exc.value.code == 'unsupported_parameter'
+def test_parallel_option_mapped_or_tolerated():
+    _, anth_body = run_client(
+        'anthropic_messages',
+        {'content': [{'type': 'text', 'text': 'ok'}], 'stop_reason': 'end_turn', 'usage': {'input_tokens': 1, 'output_tokens': 1}},
+        parallel_tool_calls=False,
+        tools=[{'type': 'function', 'function': {'name': 'lookup', 'parameters': {'type': 'object'}}}],
+    )
+    assert anth_body['tool_choice'] == {'type': 'auto', 'disable_parallel_tool_use': True}
+    _, google_body = run_client(
+        'google_generate_content',
+        {'candidates': [{'content': {'parts': [{'text': 'ok'}]}, 'finishReason': 'STOP'}], 'usageMetadata': {'promptTokenCount': 1, 'candidatesTokenCount': 1, 'totalTokenCount': 2}},
+        parallel_tool_calls=False,
+    )
+    assert 'parallel_tool_calls' not in google_body
 
 
 def test_old_module_import_compatibility():

@@ -11,6 +11,10 @@ import google.auth
 import httpx
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
+from openai_compatible_bridge.core.conversation_state import (
+    ConversationStateCache,
+    get_default_conversation_state_cache,
+)
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
 from openai_compatible_bridge.core.embedding_resilience import EmbeddingRetryPolicy, embedding_max_inflight
 from openai_compatible_bridge.core.provider_adapter import (
@@ -986,6 +990,7 @@ class VertexChatClient:
         response_format: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        state_cache: ConversationStateCache | None = None,
     ) -> dict[str, Any]:
         """OpenAI messages/params -> Vertex generateContent request body.
 
@@ -1028,7 +1033,26 @@ class VertexChatClient:
                         args = {}
                     if not isinstance(args, dict):
                         args = {}
-                    parts.append({"functionCall": {"name": str(fn.get("name", "")), "args": args}})
+                    name_str = str(fn.get("name", ""))
+                    native_part = call.get("_google_part")
+                    if not (isinstance(native_part, dict) and isinstance(native_part.get("functionCall"), dict)):
+                        call_id = str(call.get("id") or "")
+                        if call_id:
+                            cache = state_cache if state_cache is not None else get_default_conversation_state_cache()
+                            native_part = cache.get_google_call_part(call_id)
+                    if isinstance(native_part, dict) and isinstance(native_part.get("functionCall"), dict):
+                        parts.append(
+                            {
+                                **native_part,
+                                "functionCall": {
+                                    **native_part["functionCall"],
+                                    "name": name_str or str(native_part["functionCall"].get("name", "")),
+                                    "args": args,
+                                },
+                            }
+                        )
+                    else:
+                        parts.append({"functionCall": {"name": name_str, "args": args}})
                 contents.append({"role": "model", "parts": parts or [{"text": ""}]})
             elif role == "tool":
                 tool_call_id = str(msg.get("tool_call_id") or msg.get("id") or "")
@@ -1080,12 +1104,16 @@ class VertexChatClient:
 
     @staticmethod
     def _parse_candidate_parts(
-        parts_list: list[Any], *, used_call_ids: set[str] | None = None,
+        parts_list: list[Any],
+        *,
+        used_call_ids: set[str] | None = None,
+        state_cache: ConversationStateCache | None = None,
     ) -> tuple[str | None, list[dict[str, Any]] | None, str | None]:
         """generateContent parts -> (text, tool_calls, raw_finish) with synthesized ids."""
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         used = set(used_call_ids or ())
+        cache = state_cache if state_cache is not None else get_default_conversation_state_cache()
         for part_index, part in enumerate(parts_list):
             if not isinstance(part, dict) or part.get("thought") is True:
                 continue
@@ -1098,13 +1126,16 @@ class VertexChatClient:
                 args = function_call.get("args", {})
                 if not isinstance(args, dict):
                     args = {}
-                call_id = f"call_{name}_{part_index}"
-                suffix = 1
-                base_id = call_id
-                while call_id in used:
-                    call_id = f"{base_id}_{suffix}"
-                    suffix += 1
+                call_id = str(function_call.get("id") or f"call_{name}_{part_index}")
+                if not function_call.get("id"):
+                    suffix = 1
+                    base_id = call_id
+                    while call_id in used:
+                        call_id = f"{base_id}_{suffix}"
+                        suffix += 1
                 used.add(call_id)
+                if "id" in function_call or "thoughtSignature" in part:
+                    cache.save_google_call_part(call_id, part)
                 tool_calls.append(
                     {
                         "id": call_id,

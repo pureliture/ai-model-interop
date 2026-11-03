@@ -297,6 +297,15 @@ def parse_anthropic_chat_params(payload: Any) -> dict[str, Any]:
     if not isinstance(stream, bool):
         raise AnthropicBadRequest("stream must be a boolean.")
 
+    raw_tool_choice = payload.get("tool_choice")
+    tool_choice = anthropic_tool_choice_to_openai(raw_tool_choice)
+    parallel_tool_calls: bool | None = None
+    if isinstance(raw_tool_choice, dict) and "disable_parallel_tool_use" in raw_tool_choice:
+        disable_parallel = raw_tool_choice.get("disable_parallel_tool_use")
+        if not isinstance(disable_parallel, bool):
+            raise AnthropicBadRequest("tool_choice.disable_parallel_tool_use must be a boolean.")
+        parallel_tool_calls = not disable_parallel
+
     return {
         "model": model,
         "messages": messages,
@@ -307,7 +316,8 @@ def parse_anthropic_chat_params(payload: Any) -> dict[str, Any]:
         "stop": stop,
         "stream": stream,
         "tools": anthropic_tools_to_openai(payload.get("tools")),
-        "tool_choice": anthropic_tool_choice_to_openai(payload.get("tool_choice")),
+        "tool_choice": tool_choice,
+        **({"parallel_tool_calls": parallel_tool_calls} if parallel_tool_calls is not None else {}),
     }
 
 
