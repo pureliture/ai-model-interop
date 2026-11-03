@@ -13,6 +13,7 @@ logs/
 .harnesskit/
 .pytest_cache/
 .DS_Store
+graphify-out/
 .worktrees/
 .agents/
 Docs/

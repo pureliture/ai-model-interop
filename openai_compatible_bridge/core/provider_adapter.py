@@ -262,6 +262,8 @@ def pricing_fallbacks(model: str) -> tuple[str, ...]:
         return ("ollama:*",)
     if model.startswith("compat:") and model != "compat:*":
         return ("compat:*",)
+    if model.startswith("jetbrains:") and model != "jetbrains:*":
+        return ("jetbrains:*",)
     return ()
 
 

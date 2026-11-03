@@ -572,7 +572,7 @@ http://openai-compatible-bridge
 
 - uv
 - Docker 및 Docker Compose
-- Vertex 사용 시 GCP service account JSON key file (`roles/aiplatform.user`)
+- Vertex 모델 사용 시에만 Google ADC/service account JSON key (`roles/aiplatform.user`); 다른 provider와 서버 시작에는 불필요
 - Ollama 사용 시 local Ollama server
 
 ### 🧪 로컬 환경 (uv 사용)
@@ -583,11 +583,17 @@ uv run uvicorn openai_compatible_bridge.main:app --reload --port 8000
 
 ### 🐳 Docker Compose 환경
 
+Vertex 인증은 선택 사항입니다. `./secrets/vertex-sa.json`이 없더라도 Bridge는 시작할 수 있으며, Vertex 요청을 보낼 때만 인증 설정 오류가 반환됩니다. Vertex를 사용하려면 기본 디렉터리 `./secrets`에 키 파일을 두고, ADC가 프로젝트를 자동 감지하지 못하는 경우에만 `VERTEX_PROJECT`를 지정합니다.
+
+Compose의 `bridge` 네트워크는 `external: true`입니다. 즉 Compose가 네트워크를 만들지 않으므로 기본 이름 `bridge_default`가 이미 있어야 합니다. 없다면 한 번 생성하거나 `BRIDGE_NETWORK`를 기존 Docker 네트워크 이름으로 설정하세요. 이 네트워크는 같은 Docker 네트워크의 다른 컨테이너가 Bridge에 접근할 때 사용하며, 호스트 포트 `8930` 공개 여부와는 별개의 요구사항입니다.
+
 ```bash
+# bridge_default가 아직 없는 경우에만 실행
+docker network create bridge_default
 docker compose up -d --build
 ```
 
-로컬 client는 `http://127.0.0.1:8000`을, Docker network 내부에서는 `http://openai-compatible-bridge`를 사용합니다.
+로컬 client는 `http://127.0.0.1:8930`을, Docker network 내부에서는 `http://openai-compatible-bridge`를 사용합니다. JetBrains 개인 JWT 인증을 쓸 때는 `.env`에서 `JETBRAINS_AI_AUTH_MODE=jwt`로 지정합니다. 기본 `bearer` 모드는 토큰을 `Authorization: Bearer`로 전달하고, `jwt` 모드는 `Grazie-Authenticate-JWT` 헤더를 사용합니다.
 
 ---
 

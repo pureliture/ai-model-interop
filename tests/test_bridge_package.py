@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -183,3 +187,142 @@ def test_bridge_api_key_replaces_wrapper_api_key(monkeypatch):
     assert bad.status_code == 401
     assert ok.status_code == 200
     assert ok.headers["cache-control"] == "no-store"
+
+
+def test_vertex_auth_is_lazy_and_retries_after_credentials_become_available(monkeypatch):
+    import openai_compatible_bridge.providers.vertex as vertex
+
+    calls = []
+
+    def default_without_credentials(**_kwargs):
+        calls.append("missing")
+        raise RuntimeError("credentials unavailable")
+
+    monkeypatch.setattr(vertex.google.auth, "default", default_without_credentials)
+    provider = vertex.GoogleAccessTokenProvider()
+    assert calls == []
+
+    with pytest.raises(vertex.VertexAPIError) as error:
+        asyncio.run(provider.get_token())
+    assert error.value.status_code == 503
+    assert error.value.code == "vertex_auth_unavailable"
+
+    class Credentials:
+        token = "test-access-token"
+        expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
+        valid = True
+
+    def default_with_credentials(**_kwargs):
+        calls.append("available")
+        return Credentials(), "test-project"
+
+    monkeypatch.setattr(vertex.google.auth, "default", default_with_credentials)
+
+    async def get_tokens():
+        return await asyncio.gather(*(provider.get_token() for _ in range(8)))
+
+    assert asyncio.run(get_tokens()) == ["test-access-token"] * 8
+    assert calls == ["missing", "available"]
+    assert provider.project_id == "test-project"
+
+
+def test_vertex_project_is_checked_only_when_auth_is_used(monkeypatch):
+    import openai_compatible_bridge.providers.vertex as vertex
+
+    class Credentials:
+        token = "test-access-token"
+        expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
+        valid = True
+
+    calls = []
+
+    def default_without_project(**_kwargs):
+        calls.append(True)
+        return Credentials(), None
+
+    monkeypatch.setattr(vertex, "VERTEX_PROJECT", None)
+    monkeypatch.setattr(vertex.google.auth, "default", default_without_project)
+    provider = vertex.GoogleAccessTokenProvider()
+    assert calls == []
+
+    with pytest.raises(vertex.VertexAPIError) as error:
+        asyncio.run(provider.get_token())
+    assert error.value.status_code == 503
+    assert error.value.code == "vertex_project_unavailable"
+
+    monkeypatch.setattr(vertex, "VERTEX_PROJECT", "configured-project")
+    assert asyncio.run(provider.get_token()) == "test-access-token"
+    assert calls == [True, True]
+    assert provider.project_id == "configured-project"
+
+
+def test_app_starts_without_vertex_credentials_and_keeps_other_provider_available(monkeypatch):
+    import openai_compatible_bridge.main as bridge_main
+    import openai_compatible_bridge.providers.vertex as vertex
+    from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient
+
+    monkeypatch.setitem(
+        vertex.MODEL_REGISTRY,
+        "test-jetbrains",
+        {
+            "provider": "jetbrains",
+            "kind": "chat",
+            "provider_model": "gpt-test",
+            "protocol": "openai_chat_completions",
+        },
+    )
+    calls = []
+
+    def no_credentials(**_kwargs):
+        calls.append(True)
+        raise RuntimeError("credentials unavailable")
+
+    async def jetbrains_generate(_self, **_kwargs):
+        return {
+            "text": "JetBrains is available",
+            "finish_reason": "stop",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    monkeypatch.setattr(vertex.google.auth, "default", no_credentials)
+    monkeypatch.setattr(JetBrainsChatClient, "generate", jetbrains_generate)
+    monkeypatch.setattr(bridge_main, "BRIDGE_API_KEY", "")
+    app = bridge_main.create_app(cost_accounting_factory=lambda: None)
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        assert calls == []
+
+        jetbrains = client.post(
+            "/v1/chat/completions",
+            json={"model": "test-jetbrains", "messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert jetbrains.status_code == 200
+        assert jetbrains.json()["choices"][0]["message"]["content"] == "JetBrains is available"
+        assert calls == []
+
+        vertex_requests = [
+            client.post("/v1/embeddings", json={"model": "gemini-embedding-001", "input": "hello"}),
+            client.post(
+                "/v1/chat/completions",
+                json={"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "hello"}]},
+            ),
+            client.post(
+                "/v1/chat/completions",
+                json={"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "hello"}], "stream": True},
+            ),
+            client.post(
+                "/v1/rerank",
+                json={"model": "semantic-ranker-512@latest", "query": "hello", "documents": ["world"]},
+            ),
+        ]
+
+    for index, response in enumerate(vertex_requests):
+        if index == 2:
+            assert response.status_code == 200
+            assert "vertex_auth_unavailable" in response.text
+            assert "data: [DONE]" in response.text
+            continue
+        assert response.status_code == 503, f"Vertex request {index} returned {response.status_code}: {response.text}"
+        assert "vertex_auth_unavailable" in response.text
+    assert calls
