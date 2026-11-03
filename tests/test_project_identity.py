@@ -11,10 +11,11 @@ def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_pyproject_uses_bridge_name():
+def test_pyproject_keeps_legacy_distribution_name_and_updates_description():
     pyproject = tomllib.loads(_read("pyproject.toml"))
 
     assert pyproject["project"]["name"] == "openai-compatible-bridge"
+    assert pyproject["project"]["description"] == "Multi-protocol gateway for AI model APIs across providers"
 
 
 def test_dockerfile_uses_package_entrypoint():
@@ -55,10 +56,25 @@ def test_compose_and_env_use_bridge_identity():
     assert "WRAPPER_API_KEY" not in env_example
 
 
-def test_readme_uses_bridge_identity_without_legacy_product_aliases():
+def test_public_identity_uses_ai_model_interop_and_keeps_runtime_names():
     readme = _read("README.md")
+    banner = _read("assets/header.svg")
+    app_source = _read("openai_compatible_bridge/main.py")
+    publish_workflow = _read(".github/workflows/reusable-docker-publish.yml")
 
-    assert "openai-compatible-bridge" in readme
+    assert "AI Model Interop" in readme
+    assert "AI Model Interop" in banner
+    assert 'title="AI Model Interop"' in app_source
+    assert 'title="openai-compatible-bridge"' not in app_source
+    assert "org.opencontainers.image.title=AI Model Interop" in publish_workflow
+    assert "org.opencontainers.image.description=Multi-protocol gateway for AI model APIs across providers" in publish_workflow
+    assert "http://openai-compatible-bridge" in readme
     assert "vertex-ai-api-wrapper" not in readme
     assert "wrapper-vertex-ai-api" not in readme
     assert "WRAPPER_API_KEY" not in readme
+
+
+def test_exported_fastapi_app_uses_new_project_title():
+    from openai_compatible_bridge.main import app
+
+    assert app.title == "AI Model Interop"

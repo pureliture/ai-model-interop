@@ -2,7 +2,7 @@
 
 ## 목표와 범위
 
-openai-compatible-bridge에 **JetBrains AI (Grazie Gateway)** provider를 추가한다. bridge의 OpenAI-compatible API 표면(`/v1/chat/completions`, `/v1/messages`)을 통해 JetBrains AI가 제공하는 OpenAI, Anthropic (Claude), xAI (Grok), Google (Gemini) 모델을 호출할 수 있게 한다.
+AI Model Interop에 **JetBrains AI (Grazie Gateway)** provider를 추가한다. 서비스의 OpenAI-compatible API 표면(`/v1/chat/completions`, `/v1/messages`)을 통해 JetBrains AI가 제공하는 OpenAI, Anthropic (Claude), xAI (Grok), Google (Gemini) 모델을 호출할 수 있게 한다.
 
 ### 포함 범위
 - JetBrains Grazie Gateway를 새로운 provider adapter로 추가

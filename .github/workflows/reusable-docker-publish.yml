@@ -1,6 +1,6 @@
 # ==============================================================================
 # Reusable Docker Build & Publish Workflow
-# Repository: pureliture/openai-compatible-bridge
+# Repository: pureliture/ai-model-interop
 # File: .github/workflows/reusable-docker-publish.yml
 # ==============================================================================
 name: Reusable Docker Publish
@@ -146,8 +146,8 @@ jobs:
             NEURONS_SOURCE_COMMIT=${{ steps.meta.outputs.source_sha }}
             NEURONS_SOURCE_REPOSITORY=https://github.com/${{ github.repository }}
           labels: |
-            org.opencontainers.image.title=openai-compatible-bridge
-            org.opencontainers.image.description=OpenAI-compatible bridge for provider-native model APIs
+            org.opencontainers.image.title=AI Model Interop
+            org.opencontainers.image.description=Multi-protocol gateway for AI model APIs across providers
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_sha }}
             org.opencontainers.image.created=${{ steps.meta.outputs.published_at }}

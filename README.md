@@ -1,7 +1,7 @@
 <a id="top"></a>
 
 <div align="center">
-  <img src="./assets/header.svg" width="100%" alt="openai-compatible-bridge — OpenAI-compatible API surface, provider-native routing, private / local-only"/>
+  <img src="./assets/header.svg" width="100%" alt="AI Model Interop — multi-protocol AI model API gateway, provider-native routing, private / local-only"/>
 </div>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 <div align="center">
-  <h3>OpenAI-compatible API shape을 유지하면서 Vertex AI, Ollama, Palantir Foundry 같은 provider-native model API를 연결하는 <b>로컬/사내망 전용 private bridge</b>입니다.</h3>
+  <h3><b>AI Model Interop</b>은 OpenAI-compatible API와 Anthropic Messages 요청을 Vertex AI, Ollama, Palantir Foundry, JetBrains AI 등의 provider-native AI model API로 변환·라우팅하는 <b>로컬/사내망 전용 multi-protocol gateway</b>입니다.</h3>
 </div>
 
 > [!WARNING]
@@ -45,7 +45,7 @@ OpenAI-compatible client가 여러 provider를 직접 다루게 만들면 인증
 ## 🏛️ 시스템 아키텍처
 
 <div align="center">
-  <img src="./assets/architecture.svg" width="100%" alt="OpenAI-compatible bridge architecture"/>
+  <img src="./assets/architecture.svg" width="100%" alt="AI Model Interop architecture"/>
 </div>
 
 ### 🎨 핵심 설계 포인트
@@ -111,7 +111,7 @@ Palantir Foundry의 이기종 upstream LLM Proxy를 단일 OpenAI 규격(`/v1/ch
 sequenceDiagram
     autonumber
     actor Client as OpenAI-compatible Client
-    participant Bridge as openai-compatible-bridge
+    participant Bridge as AI Model Interop
     participant Foundry as Palantir Foundry LLM Proxy
 
     Client->>Bridge: POST /v1/chat/completions (tools, tool_choice)
@@ -611,7 +611,7 @@ docker compose up -d --build
 ---
 
 <p align="center">
-  <sub><b>openai-compatible-bridge</b> · private / local-only</sub><br/><br/>
+  <sub><b>AI Model Interop</b> · private / local-only</sub><br/><br/>
   <a href="#arch">🏛️ 아키텍처</a> &nbsp;·&nbsp;
   <a href="#quickstart">🚀 빠른 시작</a> &nbsp;·&nbsp;
   <a href="#top">⬆️ 맨 위로</a>
