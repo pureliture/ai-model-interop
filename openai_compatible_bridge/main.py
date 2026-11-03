@@ -942,7 +942,7 @@ async def lifespan(app: FastAPI):
         await app.state.vertex_rerank_client.close()
 
 
-app = FastAPI(title="openai-compatible-bridge", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="AI Model Interop", version="0.1.0", lifespan=lifespan)
 app.router.redirect_slashes = False
 app.add_middleware(
     CORSMiddleware,
@@ -2159,7 +2159,7 @@ def create_app(
     jetbrains_factory = jetbrains_chat_client_factory
     cost_factory = cost_accounting_factory or (lambda: build_async_cost_accounting(os.environ))
     bridge_app = FastAPI(
-        title="openai-compatible-bridge",
+        title="AI Model Interop",
         version="0.1.0",
         lifespan=_lifespan_with_factories(
             embedding_client_factory=embedding_factory,

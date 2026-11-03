@@ -1,4 +1,4 @@
-<svg viewBox="0 0 1200 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="openai-compatible-bridge — OpenAI-compatible API surface, provider-native routing">
+<svg viewBox="0 0 1200 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AI Model Interop — multi-protocol AI model API gateway, provider-native routing">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#1e1e2e"/>
@@ -19,9 +19,9 @@
   <rect x="32" y="30" width="1136" height="5" rx="2.5" fill="url(#stripe)"/>
 
   <text x="600" y="112" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="50" font-weight="700" text-anchor="middle">
-    <tspan fill="#cdd6f4">openai-compatible-</tspan><tspan fill="#89b4fa">bridge</tspan>
+    <tspan fill="#cdd6f4">AI Model </tspan><tspan fill="#89b4fa">Interop</tspan>
   </text>
-  <text x="600" y="150" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="18" fill="#a6adc8" text-anchor="middle">OpenAI-compatible API surface &#183; provider-native routing &#183; private / local-only</text>
+  <text x="600" y="150" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="18" fill="#a6adc8" text-anchor="middle">Multi-protocol AI model APIs &#183; provider-native routing &#183; private / local-only</text>
 
   <g font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="600" text-anchor="middle">
     <rect x="270" y="180" width="160" height="32" rx="16" fill="#313244" stroke="#f5e0dc" stroke-width="1.4"/>
@@ -30,7 +30,7 @@
     <line x1="438" y1="196" x2="468" y2="196" stroke="#6c7086" stroke-width="1.6" marker-end="url(#tip)"/>
 
     <rect x="476" y="180" width="140" height="32" rx="16" fill="#313244" stroke="#89b4fa" stroke-width="1.4"/>
-    <text x="546" y="201" fill="#89b4fa">/v1 bridge</text>
+    <text x="546" y="201" fill="#89b4fa">/v1 API</text>
 
     <line x1="624" y1="196" x2="654" y2="196" stroke="#6c7086" stroke-width="1.6" marker-end="url(#tip)"/>
 
