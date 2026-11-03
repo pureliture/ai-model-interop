@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 def test_bridge_package_exposes_fastapi_app():
     from openai_compatible_bridge.main import app
 
-    assert app.title == "openai-compatible-bridge"
+    assert app.title == "AI Model Interop"
 
 
 def test_create_app_accepts_provider_factories():
