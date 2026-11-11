@@ -55,6 +55,7 @@ from openai_compatible_bridge.core.cost_tracking import (
 )
 from openai_compatible_bridge.providers.foundry import FoundryChatClient
 from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient, validate_jetbrains_parameters
+from openai_compatible_bridge.junie_discovery import discovery_from_env
 from openai_compatible_bridge.providers.ollama import OllamaChatClient
 from openai_compatible_bridge.providers.openai_compatible import (
     OpenAICompatibleChatClient,
@@ -243,7 +244,15 @@ def current_allowed_models() -> set[str]:
     return _main_allowed_models()
 
 
-def _resolve_chat_model(model: str) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+def _resolve_chat_model(model: str, discovered: dict[str, dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    if model not in _vertex_allowed_models() and model in (discovered or {}):
+        cfg = discovered[model]
+        if cfg.get("protocol") is None:
+            return None, openai_error_response(
+                message="The discovered JetBrains model has an unsupported protocol; configure an explicit registry entry.",
+                status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model",
+            )
+        return cfg, None
     if model.startswith(OLLAMA_DYNAMIC_MODEL_PREFIX):
         provider_model = model[len(OLLAMA_DYNAMIC_MODEL_PREFIX):].strip()
         if not provider_model:
@@ -922,6 +931,7 @@ def _authorize_cost_admin(request: Request, authorization: str | None) -> JSONRe
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.junie_discovery = discovery_from_env()
     app.state.vertex_client = VertexEmbeddingClient()
     app.state.vertex_chat_client = VertexChatClient()
     app.state.vertex_rerank_client = VertexRerankClient()
@@ -1094,7 +1104,7 @@ def _select_chat_client(request: Request, provider: str) -> Any:
 
 
 @app.get("/v1/models", response_model=None)
-async def list_models(authorization: str | None = Header(default=None)) -> JSONResponse | dict[str, Any]:
+async def list_models(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse | dict[str, Any]:
     if BRIDGE_API_KEY and authorization != f"Bearer {BRIDGE_API_KEY}":
         return openai_error_response(
             message="Invalid wrapper API key.",
@@ -1102,18 +1112,23 @@ async def list_models(authorization: str | None = Header(default=None)) -> JSONR
             error_type="authentication_error",
             code="invalid_api_key",
         )
+    discovery = request.app.state.junie_discovery
+    discovered = await discovery.refresh()
+    registered = current_allowed_models()
     return JSONResponse(
         content={
             "object": "list",
-            "data": [_model_object(m) for m in sorted(current_allowed_models()) if _model_in_list(m)],
+            "data": [(_model_object(m) if m in registered else {"id": m, "object": "model", "created": 0, "owned_by": "jetbrains"})
+                     for m in sorted(registered | discovered.keys()) if _model_in_list(m)],
         },
-        headers={"Cache-Control": "no-store"},
+        headers={"Cache-Control": "no-store", "X-Junie-Discovery-Status":
+                 "disabled" if not discovery.enabled else "stale" if discovery.stale else "fresh"},
     )
 
 
-@app.get("/v1/models/{model_id}", response_model=None)
+@app.get("/v1/models/{model_id:path}", response_model=None)
 async def retrieve_model(
-    model_id: str, authorization: str | None = Header(default=None)
+    model_id: str, request: Request, authorization: str | None = Header(default=None)
 ) -> JSONResponse | dict[str, Any]:
     if BRIDGE_API_KEY and authorization != f"Bearer {BRIDGE_API_KEY}":
         return openai_error_response(
@@ -1122,6 +1137,9 @@ async def retrieve_model(
             error_type="authentication_error",
             code="invalid_api_key",
         )
+    discovered = await request.app.state.junie_discovery.refresh() if model_id.startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else {}
+    if model_id not in current_allowed_models() and model_id in discovered:
+        return {"id": model_id, "object": "model", "created": 0, "owned_by": "jetbrains"}
     if model_id not in current_allowed_models():
         return openai_error_response(
             message=f"The model '{model_id}' does not exist.",
@@ -1524,7 +1542,8 @@ async def create_chat_completions(
             code="invalid_api_key",
         )
 
-    _chat_cfg, model_error = _resolve_chat_model(payload.model)
+    discovered = await request.app.state.junie_discovery.refresh() if payload.model.startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else {}
+    _chat_cfg, model_error = _resolve_chat_model(payload.model, discovered)
     if model_error is not None:
         return model_error
 
@@ -1869,6 +1888,14 @@ async def create_anthropic_messages(
         cfg["kind"] = "chat"
         cfg["provider_model"] = native
         provider_model = native
+    elif params["model"] not in _vertex_allowed_models() and params["model"] in (discovered := await request.app.state.junie_discovery.refresh() if params["model"].startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else {}):
+        cfg = discovered[params["model"]]
+        if cfg.get("protocol") is None:
+            return anthropic_error_response(
+                message="The discovered JetBrains model has an unsupported protocol; configure an explicit registry entry.",
+                status_code=400, error_type="invalid_request_error",
+            )
+        provider_model = cfg["provider_model"]
     elif params["model"] not in current_allowed_models() and params["model"].startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX):
         native = params["model"][len(JETBRAINS_DYNAMIC_MODEL_PREFIX):].strip()
         if not native:
@@ -2099,6 +2126,7 @@ def _lifespan_with_factories(
 ) -> Any:
     @asynccontextmanager
     async def managed_lifespan(app: FastAPI):
+        app.state.junie_discovery = discovery_from_env()
         app.state.vertex_client = embedding_client_factory()
         app.state.vertex_chat_client = chat_client_factory()
         app.state.vertex_rerank_client = rerank_client_factory()
