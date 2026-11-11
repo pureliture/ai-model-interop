@@ -6,7 +6,7 @@
 
 별도 로그인 커맨드는 제3자 참고 구현 [junie-api](https://github.com/fabienfleureau/junie-api/tree/c56c86a406ac0d6003458d2979ae81d3e73eeac5/src)의 `auth.ts`, `services/jetbrains/device-auth.ts`, `services/jetbrains/poll-token.ts`, `lib/api-config.ts`에 나온 `junie-cli` 공개 client의 PKCE 흐름을 재현한다. 이는 JetBrains의 공식 지원 문서가 아니며 endpoint 또는 동작이 변경될 수 있다. 별도 인증을 통해 새 grant를 요청하며 Junie CLI 저장소 또는 기존 refresh token을 읽거나 공유하지 않는다.
 
-**기존 Junie 세션 유지 여부는 확인되지 않았다.** JetBrains가 같은 계정과 client에 대한 기존 grant를 새 로그인 시 철회하는지, 새 grant에 Grazie 접근을 허용하는지는 참고 코드로 확인할 수 없다. 실제 로그인과 모델 호출도 검증하지 않았다. 기존 Junie 사용에 영향을 주면 안 되는 경우 JetBrains의 정책을 확인하기 전에는 실행하지 않는다.
+한 환경에서 별도 grant 발급·갱신과 Grazie 모델 호출이 성공했고 직후 기존 Junie 로그인으로 모델을 호출했다. 이는 JetBrains의 모든 계정이나 향후 동작을 보장하지 않는다. 기존 세션이 유지되어야 한다면 이 비공식 흐름의 위험과 JetBrains 정책을 확인한다.
 
 전용 로컬 디렉터리를 실행 사용자 소유 `0700`으로 준비한 뒤 아래 명령을 사용자가 직접 실행하고 표시된 URL에서 승인한다. 기존 파일을 덮어쓰지 않으며 browser를 자동으로 열지 않는다. 파일이나 토큰 내용을 터미널에 표시하지 않는다.
 

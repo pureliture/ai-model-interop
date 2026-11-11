@@ -262,7 +262,7 @@ JetBrains AI는 Grazie Gateway를 통해 OpenAI, Anthropic (Claude), xAI (Grok),
 }
 ```
 
-* 인증: `JETBRAINS_AI_TOKEN`으로 정적 토큰을 주입하거나 별도 OAuth grant를 발급해 `JETBRAINS_AI_OAUTH_FILE`로 갱신 저장소를 지정한다. 독립 grant 발급과 기존 Junie 세션에 대한 영향은 검증되지 않았으며, [로그인 및 보안 제약](specs/jetbrains-grazie-provider/oauth-refresh.md)을 확인해야 한다.
+* 인증: `JETBRAINS_AI_TOKEN`으로 정적 토큰을 주입하거나 별도 OAuth grant를 발급해 `JETBRAINS_AI_OAUTH_FILE`로 갱신 저장소를 지정한다. 별도 grant의 발급·갱신과 기존 Junie 로그인 유지가 한 환경에서 확인됐으나 모든 계정에 보장되지 않으며, [로그인 및 보안 제약](specs/jetbrains-grazie-provider/oauth-refresh.md)을 확인해야 한다.
 * Base URL: `JETBRAINS_AI_BASE_URL` (기본값: `https://ingrazzio-cloud-prod.labs.jb.gg`)
 * 동적 모델: `jetbrains:<native-model>` prefix로 registry 없이 직접 호출 가능 (예: `jetbrains:gpt-5.4`)
 * 과금: `COST_PROVIDER_BILLING_JSON`에 `"jetbrains"` 키를 실제 계약(`subscription` 등)으로 분류한다.
@@ -305,7 +305,7 @@ providers:
       timeoutMs: 15000
 ```
 
-`BRIDGE_API_KEY`를 활성화한 경우에는 OMP provider에 해당 bridge 인증을 별도로 설정한다. OMP도 모델 목록을 캐시할 수 있으므로 변경 직후에는 OMP의 목록 새로고침이 필요할 수 있다.
+`BRIDGE_API_KEY`를 활성화한 경우에는 OMP provider에 해당 bridge 인증을 별도로 설정한다. 처음에는 `omp models jetbrains-bridge`로 탐색·캐시한 다음 `omp --model 'jetbrains-bridge/jetbrains:gpt-6-luna'`처럼 선택한다. 이후 모델이 변경되면 OMP의 목록을 새로고침한다.
 
 ### Model Alias
 
