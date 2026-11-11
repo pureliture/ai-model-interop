@@ -262,11 +262,50 @@ JetBrains AI는 Grazie Gateway를 통해 OpenAI, Anthropic (Claude), xAI (Grok),
 }
 ```
 
-* 인증: JetBrains OAuth (PKCE) → JWT 토큰. `JETBRAINS_AI_TOKEN` 환경변수로 주입. bridge는 토큰 갱신을 하지 않는다.
+* 인증: `JETBRAINS_AI_TOKEN`으로 정적 토큰을 주입하거나 별도 OAuth grant를 발급해 `JETBRAINS_AI_OAUTH_FILE`로 갱신 저장소를 지정한다. 별도 grant의 발급·갱신과 기존 Junie 로그인 유지가 한 환경에서 확인됐으나 모든 계정에 보장되지 않으며, [로그인 및 보안 제약](specs/jetbrains-grazie-provider/oauth-refresh.md)을 확인해야 한다.
 * Base URL: `JETBRAINS_AI_BASE_URL` (기본값: `https://ingrazzio-cloud-prod.labs.jb.gg`)
 * 동적 모델: `jetbrains:<native-model>` prefix로 registry 없이 직접 호출 가능 (예: `jetbrains:gpt-5.4`)
 * 과금: `COST_PROVIDER_BILLING_JSON`에 `"jetbrains"` 키를 실제 계약(`subscription` 등)으로 분류한다.
 * reasoning override: JetBrains의 네 가지 프로토콜은 아직 검증된 변환 계약이 없으므로 OpenAI의 `reasoning_effort`/`reasoning` 및 Anthropic의 `output_config.effort` 요청을 스트리밍 시작과 upstream 호출 전에 HTTP 400으로 거부한다. 미지정 요청은 그대로 처리한다.
+
+#### Junie ACP 모델 탐색과 OMP 연결
+
+브리지를 Junie가 설치되고 로그인된 사용자 환경에서 실행하고 `JUNIE_DISCOVERY_ENABLED=true`를 설정한다. 선택적으로 `JUNIE_DISCOVERY_COMMAND`에 실행 파일 경로, `JUNIE_DISCOVERY_CWD`에 Junie 세션 작업 디렉터리를 지정한다. 브리지는 모델 목록이나 JetBrains 모델 요청 시 `junie --acp=true --skip-update-check`로 `initialize`와 `session/new`만 수행하며 추론 요청은 보내지 않는다. 탐색은 최대 10초, 성공 결과는 5분 동안 캐시한다. 실패하면 마지막 성공 목록을 유지하고 30초 후 재시도한다. `/v1/models`의 `X-Junie-Discovery-Status`는 `disabled`, `fresh`, `stale` 중 하나다. 첫 탐색이 실패했다면 stale 목록은 비어 있다.
+
+ACP의 `model` 옵션에서 `jetbrains-ai` 그룹의 `v1:12:jetbrains-ai:<native>` 항목 중 안전한 ID를 모두 `jetbrains:<native>`로 노출한다. `claude-`, `gemini-`, `grok-`, `gpt-` 및 `openai-gpt-` 계열은 각 프로토콜로 연결하며 upstream에도 변환 없이 원래 native ID를 전달한다. 그 밖의 발견 모델은 목록에서 확인할 수 있지만, 프로토콜을 추측하지 않고 채팅 요청을 `unsupported_model` 오류로 거부한다. 명시적 registry로 정확한 `provider_model`과 `protocol`을 지정하면 탐색 결과보다 우선한다. ACP 목록은 실제 Grazie 모델 ID 호환성이나 호출 성공을 보증하지 않으며 upstream 오류는 기존 오류 처리 경로로 전달된다. ACP는 context 크기와 출력 한도를 보장하지 않으므로 발견 항목에 이를 광고하지 않는다.
+
+탐색되지 않은 `jetbrains:<native>` 직접 호출은 기존 동작대로 기본 OpenAI 프로토콜을 사용한다. 이 동작은 임의 ID에 대한 호환성 보장이 아니며, 다른 프로토콜이 필요하면 registry에 명시해야 한다.
+
+모델 발견 기능은 Junie 프로세스를 통해 목록만 조회하며 자격 증명을 직접 읽지 않는다. 기존 Grazie 채팅 경로에는 별도의 인증이 필요하다. 인증·모델 사용 권한과 upstream ID는 실제 호출로 별도 확인해야 한다.
+로컬 실행 예시:
+
+```sh
+mkdir -m 700 -p "$HOME/.local/share/ai-model-interop"
+uv run python -m openai_compatible_bridge.jetbrains_login --output "$HOME/.local/share/ai-model-interop/jetbrains-oauth.json"
+export JETBRAINS_AI_OAUTH_FILE="$HOME/.local/share/ai-model-interop/jetbrains-oauth.json"
+export JUNIE_DISCOVERY_ENABLED=true
+export MODEL_LIST_INCLUDE='jetbrains:*'
+uv run uvicorn openai_compatible_bridge.main:app --host 127.0.0.1 --port 8000
+```
+
+브라우저에서 별도 인증 grant를 승인해야 한다. 기존 Junie refresh token을 복사·공유하지 않는다. Compose 사용 시 Junie 실행 파일과 로그인 환경, OAuth 파일이 있는 전용 writable 디렉터리를 별도로 제공해야 한다. `MODEL_LIST_INCLUDE`는 목록에 노출할 모델을 필터링하며, 생략하면 다른 provider 모델도 OMP 목록에 나타날 수 있다.
+
+
+예를 들어 인증을 사용하지 않는 로컬 bridge라면 OMP의 `~/.omp/agent/models.yml`에 다음을 추가한다. `baseUrl`의 `/v1`은 OMP discovery에서 다시 붙이지 않도록 `injectV1: false`를 설정한다.
+
+```yaml
+providers:
+  jetbrains-bridge:
+    baseUrl: http://127.0.0.1:8000/v1
+    api: openai-completions
+    auth: none
+    discovery:
+      type: openai-models-list
+      injectV1: false
+      timeoutMs: 15000
+```
+
+`BRIDGE_API_KEY`를 활성화한 경우에는 OMP provider에 해당 bridge 인증을 별도로 설정한다. 처음에는 `omp models jetbrains-bridge`로 탐색·캐시한 다음 `omp --model 'jetbrains-bridge/jetbrains:gpt-6-luna'`처럼 선택한다. 이후 모델이 변경되면 OMP의 목록을 새로고침한다.
 
 ### Model Alias
 

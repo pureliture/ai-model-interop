@@ -33,7 +33,13 @@ services:
       FOUNDRY_HTTP_TIMEOUT_SECONDS: ${FOUNDRY_HTTP_TIMEOUT_SECONDS:-}
       JETBRAINS_AI_BASE_URL: ${JETBRAINS_AI_BASE_URL:-https://ingrazzio-cloud-prod.labs.jb.gg}
       JETBRAINS_AI_TOKEN: ${JETBRAINS_AI_TOKEN:-}
+      # 컨테이너 안의 경로. 사용 시 별도의 전용 writable directory mount를 구성한다.
+      JETBRAINS_AI_OAUTH_FILE: ${JETBRAINS_AI_OAUTH_FILE:-}
       JETBRAINS_AI_HTTP_TIMEOUT_SECONDS: ${JETBRAINS_AI_HTTP_TIMEOUT_SECONDS:-}
+      # Junie와 해당 사용자 인증 환경이 컨테이너에 제공된 경우에만 사용한다.
+      JUNIE_DISCOVERY_ENABLED: ${JUNIE_DISCOVERY_ENABLED:-false}
+      JUNIE_DISCOVERY_COMMAND: ${JUNIE_DISCOVERY_COMMAND:-junie}
+      JUNIE_DISCOVERY_CWD: ${JUNIE_DISCOVERY_CWD:-}
       STRUCTURED_OUTPUT_REPAIR_ENABLED: ${STRUCTURED_OUTPUT_REPAIR_ENABLED:-false}
       STRUCTURED_OUTPUT_REPAIR_MODELS: ${STRUCTURED_OUTPUT_REPAIR_MODELS:-ollama:qwen3.5:cloud,ollama:gemma4:31b-cloud,ollama:glm-5.2:cloud}
       # sqlite는 로컬 호환용이며 multi-pod 보장 없음. postgres는 전용 bridge DB만 사용한다.

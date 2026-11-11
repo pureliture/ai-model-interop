@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import json
 import os
+import copy
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
+
+from openai_compatible_bridge.providers.jetbrains_oauth import JetBrainsOAuthError, JetBrainsOAuthStore
 
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
 from openai_compatible_bridge.core.provider_adapter import (
@@ -121,6 +124,8 @@ class JetBrainsChatClient:
     ) -> None:
         self.base_url = (base_url if base_url is not None else JETBRAINS_AI_BASE_URL).strip().rstrip("/")
         self.token = token if token is not None else JETBRAINS_AI_TOKEN
+        oauth_path = os.getenv("JETBRAINS_AI_OAUTH_FILE", "").strip()
+        self.oauth_store = JetBrainsOAuthStore(oauth_path, timeout=HTTP_TIMEOUT_SECONDS) if oauth_path and token is None and not self.token else None
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS))
 
     async def close(self) -> None:
@@ -194,6 +199,16 @@ class JetBrainsChatClient:
                 code="provider_config_error",
             )
         return _grazie_headers(self._llm_model_header(protocol), self.token)
+
+    async def _request_token(self) -> str:
+        if self.token:
+            return self.token
+        if self.oauth_store is None:
+            raise VertexAPIError(503, "JETBRAINS_AI_TOKEN is not configured.", code="provider_config_error")
+        try:
+            return await self.oauth_store.access_token()
+        except JetBrainsOAuthError as exc:
+            raise VertexAPIError(503, str(exc), code="provider_auth_error") from None
 
     @staticmethod
     def _build_openai_request_body(
@@ -483,7 +498,7 @@ class JetBrainsChatClient:
         protocol = self._protocol(resolved_config)
         llm_model = self._llm_model_header(protocol)
         url = self._url_for_protocol(protocol, model=(resolved_config or {}).get("provider_model", model), stream=False)
-        headers = self._headers(protocol)
+        headers = _grazie_headers(self._llm_model_header(protocol), await self._request_token())
         body = self._build_request_body(
             protocol=protocol,
             model=(resolved_config or {}).get("provider_model", model),
@@ -604,8 +619,10 @@ class JetBrainsChatClient:
         from openai_compatible_bridge.providers.foundry import FoundryChatClient
 
         native_model = (resolved_config or {}).get("provider_model", model)
+        request_client = copy.copy(self)
+        request_client.token = await self._request_token()
         async for event in FoundryChatClient.stream_chat(
-            self, model=native_model, messages=messages, max_tokens=max_tokens,
+            request_client, model=native_model, messages=messages, max_tokens=max_tokens,
             temperature=temperature, top_p=top_p, stop=stop,
             response_format=response_format, resolved_config=resolved_config,
             tools=tools, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
