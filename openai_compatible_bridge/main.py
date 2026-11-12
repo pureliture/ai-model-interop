@@ -1094,6 +1094,10 @@ def _jetbrains_image_models() -> set[str]:
 
 def _discovered_jetbrains_model_object(model_id: str, cfg: dict[str, Any]) -> dict[str, Any]:
     obj: dict[str, Any] = {"id": model_id, "object": "model", "created": 0, "owned_by": "jetbrains"}
+    for key in ("context_length", "max_tokens"):
+        value = cfg.get(key)
+        if type(value) is int and value > 0:
+            obj[key] = value
     if model_id in _jetbrains_image_models():
         obj["input"] = ["text", "image"]
         obj["capabilities"] = {"images": True, "streaming": True}

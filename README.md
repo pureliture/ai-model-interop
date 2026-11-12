@@ -271,9 +271,11 @@ JetBrains AI는 Grazie Gateway를 통해 OpenAI, Anthropic (Claude), xAI (Grok),
 
 #### Junie ACP 모델 탐색과 OMP 연결
 
-브리지를 Junie가 설치되고 로그인된 사용자 환경에서 실행하고 `JUNIE_DISCOVERY_ENABLED=true`를 설정한다. 선택적으로 `JUNIE_DISCOVERY_COMMAND`에 실행 파일 경로, `JUNIE_DISCOVERY_CWD`에 Junie 세션 작업 디렉터리를 지정한다. 브리지는 모델 목록이나 JetBrains 모델 요청 시 `junie --acp=true --skip-update-check`로 `initialize`, `session/new`와 모델별 `session/set_config_option`을 수행해 추론 수준 선택지를 확인하지만 추론 요청은 보내지 않는다. 시간 제한으로 확인하지 못한 모델의 추론 수준은 노출하지 않는다. 탐색은 최대 10초, 성공 결과는 5분 동안 캐시한다. 실패하면 마지막 성공 목록을 유지하고 30초 후 재시도한다. `/v1/models`의 `X-Junie-Discovery-Status`는 `disabled`, `fresh`, `stale` 중 하나다. 첫 탐색이 실패했다면 stale 목록은 비어 있다.
+브리지를 Junie가 설치되고 로그인된 사용자 환경에서 실행하고 `JUNIE_DISCOVERY_ENABLED=true`를 설정한다. 선택적으로 `JUNIE_DISCOVERY_COMMAND`에 실행 파일 경로, `JUNIE_DISCOVERY_CWD`에 Junie 세션 작업 디렉터리를 지정한다. 브리지는 모델 목록이나 JetBrains 모델 요청 시 `junie --acp=true --skip-update-check`로 `initialize`, `session/new`와 모델별 `session/set_config_option`을 수행해 추론 수준 선택지를 확인하지만 추론 요청은 보내지 않는다. 시간 제한으로 확인하지 못한 모델의 추론 수준은 노출하지 않는다. ACP 탐색은 최대 10초, 선택적인 JAR 조회는 추가로 최대 5초이며 성공 결과는 5분 동안 캐시한다. ACP 탐색이 실패하면 마지막 성공 목록을 유지하고 30초 후 재시도한다. `/v1/models`의 `X-Junie-Discovery-Status`는 `disabled`, `fresh`, `stale` 중 하나다. 첫 탐색이 실패했다면 stale 목록은 비어 있다.
 
-ACP의 `model` 옵션에서 `jetbrains-ai` 그룹의 `v1:12:jetbrains-ai:<native>` 항목 중 안전한 ID를 모두 `jetbrains:<native>`로 노출한다. `claude-`, `gemini-`, `grok-`, `gpt-` 및 `openai-gpt-` 계열은 각 프로토콜로 연결하며 upstream에도 변환 없이 원래 native ID를 전달한다. 그 밖의 발견 모델은 목록에서 확인할 수 있지만, 프로토콜을 추측하지 않고 채팅 요청을 `unsupported_model` 오류로 거부한다. 명시적 registry로 정확한 `provider_model`과 `protocol`을 지정하면 탐색 결과보다 우선한다. ACP 목록은 실제 Grazie 모델 ID 호환성이나 호출 성공을 보증하지 않으며 upstream 오류는 기존 오류 처리 경로로 전달된다. ACP는 context 크기와 출력 한도를 보장하지 않으므로 발견 항목에 이를 광고하지 않는다.
+ACP의 `model` 옵션에서 `jetbrains-ai` 그룹의 `v1:12:jetbrains-ai:<native>` 항목 중 안전한 ID를 모두 `jetbrains:<native>`로 노출한다. `claude-`, `gemini-`, `grok-`, `gpt-` 및 `openai-gpt-` 계열은 각 프로토콜로 연결하며 upstream에도 변환 없이 원래 native ID를 전달한다. 그 밖의 발견 모델은 목록에서 확인할 수 있지만, 프로토콜을 추측하지 않고 채팅 요청을 `unsupported_model` 오류로 거부한다. 명시적 registry로 정확한 `provider_model`과 `protocol`을 지정하면 탐색 결과보다 우선한다. ACP 목록은 실제 Grazie 모델 ID 호환성이나 호출 성공을 보증하지 않으며 upstream 오류는 기존 오류 처리 경로로 전달된다.
+
+선택적으로 `JUNIE_DISCOVERY_JAR`에 **ACP 실행과 동일한 Junie 버전**의 JAR 경로 또는 단일 파일에 일치하는 glob을 지정하면 JAR의 모델별 `maxContextTokens`와 `maxOutputTokens`를 읽어, ACP에서 발견된 동일 ID에만 각각 `context_length`와 `max_tokens`로 노출한다. Java 소스 실행을 지원하는 JDK가 필요하며 `JUNIE_DISCOVERY_JAVA`로 Java 실행 파일을 지정할 수 있다. JAR 탐색·실행 실패 또는 값이 없는 경우 해당 한도는 생략되며 클라이언트 기본값이 적용될 수 있다. Junie 내부 클래스 형식은 버전에 따라 변경될 수 있고, Junie 설정값은 Grazie 서버의 실제 한도를 보증하지 않는다.
 
 탐색되지 않은 `jetbrains:<native>` 직접 호출은 기존 동작대로 기본 OpenAI 프로토콜을 사용한다. 이 동작은 임의 ID에 대한 호환성 보장이 아니며, 다른 프로토콜이 필요하면 registry에 명시해야 한다.
 

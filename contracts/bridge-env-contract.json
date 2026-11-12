@@ -36,6 +36,8 @@
     "JUNIE_DISCOVERY_ENABLED": {"type": "boolean"},
     "JUNIE_DISCOVERY_COMMAND": {"type": "string"},
     "JUNIE_DISCOVERY_CWD": {"type": "path"},
+    "JUNIE_DISCOVERY_JAR": {"type": "string"},
+    "JUNIE_DISCOVERY_JAVA": {"type": "string"},
     "COST_TRACKING_ENABLED": {"type": "boolean"},
     "COST_PROVIDER_BILLING_JSON": {"type": "json"},
     "COST_TRACKING_PROVIDERS": {"type": "csv"},

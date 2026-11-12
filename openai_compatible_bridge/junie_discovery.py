@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import glob
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 _PREFIX = "v1:12:jetbrains-ai:"
@@ -147,6 +149,43 @@ async def _fetch(command: str, cwd: str) -> dict[str, dict[str, Any]]:
         await proc.wait()
 
 
+async def _jar_metadata(pattern: str) -> dict[str, dict[str, int]]:
+    """Read token limits from an explicitly configured, unambiguous Junie JAR."""
+    jars = glob.glob(os.path.expanduser(pattern))
+    if len(jars) != 1:
+        return {}
+    source = Path(__file__).with_name("JunieModelMetadata.java")
+    proc = await asyncio.create_subprocess_exec(
+        os.getenv("JUNIE_DISCOVERY_JAVA", "java"), "--class-path", jars[0], str(source),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+    except asyncio.TimeoutError:
+        return {}
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+    if proc.returncode != 0 or len(stdout) > 1024 * 1024:
+        return {}
+    metadata: dict[str, dict[str, int]] = {}
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or not _NATIVE.fullmatch(fields[0]):
+            continue
+        limits: dict[str, int] = {}
+        for key, value in zip(("context_length", "max_tokens"), fields[1:]):
+            if value.isascii() and value.isdigit() and 0 < int(value) <= 100_000_000:
+                limits[key] = int(value)
+        if limits:
+            metadata[fields[0]] = limits
+    return metadata
+
+
 class JunieDiscovery:
     def __init__(self, *, enabled: bool, command: str = "junie", cwd: str | None = None,
                  ttl: float = 300, timeout: float = 10) -> None:
@@ -167,6 +206,14 @@ class JunieDiscovery:
                 return self.models
             try:
                 models = await asyncio.wait_for(_fetch(self.command, self.cwd), timeout=self.timeout)
+                jar_pattern = os.getenv("JUNIE_DISCOVERY_JAR", "")
+                if jar_pattern:
+                    try:
+                        metadata = await _jar_metadata(jar_pattern)
+                    except OSError:
+                        metadata = {}
+                    for model in models.values():
+                        model.update(metadata.get(model["provider_model"], {}))
             except (OSError, ValueError, asyncio.TimeoutError, json.JSONDecodeError):
                 # Keep the last successful snapshot and retry after a bounded delay.
                 self.stale = True

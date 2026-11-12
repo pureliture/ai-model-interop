@@ -94,6 +94,38 @@ def test_discovered_effort_metadata_only_advertises_routable_levels(monkeypatch)
         assert client.get("/v1/models/jetbrains:gpt-test").json()["supported_reasoning_levels"] == expected
 
 
+def test_jar_limits_are_joined_only_to_discovered_models(monkeypatch):
+    async def fetch(*args):
+        return discovery.parse_models(_result(
+            "v1:12:jetbrains-ai:gemini-4-argon",
+            "v1:12:jetbrains-ai:claude-sonnet-5",
+            "v1:12:jetbrains-ai:gemini-unknown",
+        ))
+    async def metadata(pattern):
+        assert pattern == "/installed/junie.jar"
+        return {
+            "gemini-4-argon": {"context_length": 1048576},
+            "claude-sonnet-5": {"context_length": 1000000, "max_tokens": 128000},
+            "unlisted": {"context_length": 42},
+        }
+    monkeypatch.setenv("JUNIE_DISCOVERY_JAR", "/installed/junie.jar")
+    monkeypatch.setattr(discovery, "_fetch", fetch)
+    monkeypatch.setattr(discovery, "_jar_metadata", metadata)
+    monkeypatch.setattr(main, "discovery_from_env", lambda: discovery.JunieDiscovery(enabled=True))
+    app = main.create_app(embedding_client_factory=_FakeProvider, chat_client_factory=_FakeProvider,
+        rerank_client_factory=_FakeProvider, ollama_chat_client_factory=_FakeProvider,
+        foundry_chat_client_factory=_FakeProvider, jetbrains_chat_client_factory=_FakeJetBrains,
+        cost_accounting_factory=lambda: None)
+    with TestClient(app) as client:
+        rows = {row["id"]: row for row in client.get("/v1/models").json()["data"]}
+        assert rows["jetbrains:gemini-4-argon"]["context_length"] == 1048576
+        assert "max_tokens" not in rows["jetbrains:gemini-4-argon"]
+        assert rows["jetbrains:claude-sonnet-5"]["max_tokens"] == 128000
+        assert "context_length" not in rows["jetbrains:gemini-unknown"]
+        assert "jetbrains:unlisted" not in rows
+        assert client.get("/v1/models/jetbrains:claude-sonnet-5").json()["context_length"] == 1000000
+
+
 def test_discovered_listing_chat_and_registry_precedence(monkeypatch):
     async def fetch(*args):
         return discovery.parse_models(_result("v1:12:jetbrains-ai:claude-sonnet-5", "v1:12:jetbrains-ai:unknown-model"))
