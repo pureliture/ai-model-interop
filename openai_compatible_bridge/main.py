@@ -485,6 +485,9 @@ def _estimate_text_tokens(value: Any) -> int:
     if isinstance(value, list):
         return sum(_estimate_text_tokens(item) for item in value)
     if isinstance(value, dict):
+        if value.get("type") in {"image_url", "input_image", "image"}:
+            # Conservative admission forecast; upstream usage replaces it on completion.
+            return 4000
         total = 0
         for key in ("text", "content"):
             item = value.get(key)
@@ -1083,6 +1086,33 @@ def _model_object(model_id: str) -> dict[str, Any]:
     obj["runtime"] = runtime
     return obj
 
+def _jetbrains_image_models() -> set[str]:
+    patterns = [p.strip() for p in os.getenv("JETBRAINS_AI_IMAGE_MODELS", "").split(",") if p.strip()]
+    return {p if p.startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else JETBRAINS_DYNAMIC_MODEL_PREFIX + p
+            for p in patterns}
+
+
+def _discovered_jetbrains_model_object(model_id: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    obj: dict[str, Any] = {"id": model_id, "object": "model", "created": 0, "owned_by": "jetbrains"}
+    if model_id in _jetbrains_image_models():
+        obj["input"] = ["text", "image"]
+        obj["capabilities"] = {"images": True, "streaming": True}
+    protocol = cfg.get("protocol")
+    supported = {
+        "openai_responses": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
+        "xai_responses": {"low", "medium", "high", "xhigh"},
+        "anthropic_messages": {"low", "medium", "high", "xhigh", "max"},
+        "google_generate_content": {"low", "medium", "high"},
+    }.get(protocol)
+    if supported is None:
+        return obj
+    efforts = cfg.get("reasoning_efforts")
+    if isinstance(efforts, list):
+        levels = [level for level in efforts if isinstance(level, str) and level in supported]
+        if levels:
+            obj["supported_reasoning_levels"] = [{"effort": level} for level in levels]
+    return obj
+
 
 def _model_in_list(model_id: str) -> bool:
     patterns = [p.strip() for p in _vertex_mod.MODEL_LIST_INCLUDE.split(",") if p.strip()]
@@ -1118,7 +1148,7 @@ async def list_models(request: Request, authorization: str | None = Header(defau
     return JSONResponse(
         content={
             "object": "list",
-            "data": [(_model_object(m) if m in registered else {"id": m, "object": "model", "created": 0, "owned_by": "jetbrains"})
+            "data": [(_model_object(m) if m in registered else _discovered_jetbrains_model_object(m, discovered[m]))
                      for m in sorted(registered | discovered.keys()) if _model_in_list(m)],
         },
         headers={"Cache-Control": "no-store", "X-Junie-Discovery-Status":
@@ -1139,7 +1169,7 @@ async def retrieve_model(
         )
     discovered = await request.app.state.junie_discovery.refresh() if model_id.startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else {}
     if model_id not in current_allowed_models() and model_id in discovered:
-        return {"id": model_id, "object": "model", "created": 0, "owned_by": "jetbrains"}
+        return _discovered_jetbrains_model_object(model_id, discovered[model_id])
     if model_id not in current_allowed_models():
         return openai_error_response(
             message=f"The model '{model_id}' does not exist.",
@@ -1355,7 +1385,7 @@ def _chat_completions_stream(
                     stream_kwargs["reasoning_effort"] = payload.reasoning_effort
                     stream_kwargs["reasoning"] = payload.reasoning
                 elif resolved_config is not None:
-                    if provider == "foundry":
+                    if provider in {"foundry", "jetbrains"}:
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
                     elif provider in {"openai_compat", "openai_compatible"} and payload.reasoning_effort is not None:
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
@@ -1385,6 +1415,9 @@ def _chat_completions_stream(
                         delta["content"] = delta_text
                     if delta_tool_calls:
                         delta["tool_calls"] = delta_tool_calls
+                    thinking_blocks = event.get("thinking_blocks")
+                    if thinking_blocks:
+                        delta["thinking_blocks"] = thinking_blocks
 
                     if delta:
                         yield _chunk(delta, None)
@@ -1562,16 +1595,24 @@ async def create_chat_completions(
             )
 
     provider = (_chat_cfg or {}).get("provider", "vertex")
-    if provider == "jetbrains" and (payload.reasoning_effort is not None or payload.reasoning is not None):
-        param = "reasoning_effort" if payload.reasoning_effort is not None else "reasoning"
-        return openai_error_response(
-            message=f"{param} is not supported for JetBrains.", status_code=400,
-            error_type="invalid_request_error", code="unsupported_parameter", param=param,
-        )
+    if provider == "jetbrains" and payload.reasoning is not None:
+        effort = payload.reasoning.get("effort")
+        if set(payload.reasoning) != {"effort"} or not isinstance(effort, str):
+            return openai_error_response(
+                message="JetBrains reasoning supports only a string effort.", status_code=400,
+                error_type="invalid_request_error", code="unsupported_parameter", param="reasoning",
+            )
+        if payload.reasoning_effort is not None and payload.reasoning_effort != effort:
+            return openai_error_response(
+                message="Conflicting reasoning effort values.", status_code=400,
+                error_type="invalid_request_error", code="invalid_request", param="reasoning",
+            )
+        payload.reasoning_effort = effort
     if provider == "jetbrains":
         try:
             validate_jetbrains_parameters(
                 (_chat_cfg or {}).get("protocol") or "openai_responses",
+                reasoning_effort=payload.reasoning_effort,
                 parallel_tool_calls=payload.parallel_tool_calls,
                 response_format=payload.response_format,
             )
@@ -1645,7 +1686,7 @@ async def create_chat_completions(
                 generate_kwargs["tool_choice"] = payload.tool_choice
             if payload.parallel_tool_calls is not None:
                 generate_kwargs["parallel_tool_calls"] = payload.parallel_tool_calls
-            if provider == "foundry":
+            if provider in {"foundry", "jetbrains"}:
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
             elif provider in {"openai_compat", "openai_compatible"} and payload.reasoning_effort is not None:
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
@@ -1676,6 +1717,8 @@ async def create_chat_completions(
                 choice_message["content"] = ""
             if "tool_calls" in result and result["tool_calls"]:
                 choice_message["tool_calls"] = result["tool_calls"]
+            if result.get("thinking_blocks"):
+                choice_message["thinking_blocks"] = result["thinking_blocks"]
 
             return {
                 "id": _new_chat_completion_id(),
@@ -1730,7 +1773,7 @@ def _anthropic_generate_kwargs(
         generate_kwargs["tools"] = params["tools"]
     if params["tool_choice"] is not None:
         generate_kwargs["tool_choice"] = params["tool_choice"]
-    if provider in {"openai_compat", "openai_compatible"} and params["reasoning_effort"] is not None:
+    if provider in {"openai_compat", "openai_compatible", "jetbrains"} and params["reasoning_effort"] is not None:
         generate_kwargs["reasoning_effort"] = params["reasoning_effort"]
     if provider == "foundry":
         generate_kwargs["reasoning_effort"] = None
@@ -1927,11 +1970,16 @@ async def create_anthropic_messages(
         provider_model = (cfg or {}).get("provider_model", params["model"])
 
     provider = (cfg or {}).get("provider", "vertex")
-    if provider == "jetbrains" and params["reasoning_effort"] is not None:
-        return anthropic_error_response(
-            message="output_config.effort is not supported for JetBrains.",
-            status_code=400, error_type="invalid_request_error",
-        )
+    if provider == "jetbrains":
+        try:
+            validate_jetbrains_parameters(
+                (cfg or {}).get("protocol") or "openai_responses",
+                reasoning_effort=params["reasoning_effort"],
+            )
+        except VertexAPIError as exc:
+            return anthropic_error_response(
+                message=exc.message, status_code=exc.status_code, error_type="invalid_request_error",
+            )
     if provider == "openai_compatible":
         provider = "openai_compat"
     chat_client = _select_chat_client(request, provider)

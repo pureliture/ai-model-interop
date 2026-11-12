@@ -68,6 +68,32 @@ def test_cache_failure_keeps_snapshot_and_successful_empty_clears(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_discovered_effort_metadata_only_advertises_routable_levels(monkeypatch):
+    async def fetch(*args):
+        return {
+            "jetbrains:gpt-test": {"provider": "jetbrains", "kind": "chat",
+                "provider_model": "gpt-test", "protocol": "openai_responses",
+                "reasoning_efforts": ["none", "low", "high", "max"]},
+            "jetbrains:claude-test": {"provider": "jetbrains", "kind": "chat",
+                "provider_model": "claude-test", "protocol": "anthropic_messages",
+                "reasoning_efforts": ["low", "high"]},
+        }
+    monkeypatch.setattr(discovery, "_fetch", fetch)
+    monkeypatch.setattr(main, "discovery_from_env", lambda: discovery.JunieDiscovery(enabled=True))
+    app = main.create_app(embedding_client_factory=_FakeProvider, chat_client_factory=_FakeProvider,
+        rerank_client_factory=_FakeProvider, ollama_chat_client_factory=_FakeProvider,
+        foundry_chat_client_factory=_FakeProvider, jetbrains_chat_client_factory=_FakeJetBrains,
+        cost_accounting_factory=lambda: None)
+    with TestClient(app) as client:
+        rows = {row["id"]: row for row in client.get("/v1/models").json()["data"]}
+        expected = [{"effort": level} for level in ("none", "low", "high", "max")]
+        assert rows["jetbrains:gpt-test"]["supported_reasoning_levels"] == expected
+        assert rows["jetbrains:claude-test"]["supported_reasoning_levels"] == [
+            {"effort": "low"}, {"effort": "high"},
+        ]
+        assert client.get("/v1/models/jetbrains:gpt-test").json()["supported_reasoning_levels"] == expected
+
+
 def test_discovered_listing_chat_and_registry_precedence(monkeypatch):
     async def fetch(*args):
         return discovery.parse_models(_result("v1:12:jetbrains-ai:claude-sonnet-5", "v1:12:jetbrains-ai:unknown-model"))
@@ -184,4 +210,98 @@ def test_timeout_preserves_cache_and_coalesces_requests(monkeypatch):
         first, second = await asyncio.gather(cache.refresh(), cache.refresh())
         assert first == second == cache.models
         assert calls == 1 and cache.stale
+    asyncio.run(scenario())
+
+
+def test_model_specific_efforts_are_discovered_without_guessing(monkeypatch):
+    import json
+
+    async def scenario():
+        sent = []
+        values = ["v1:12:jetbrains-ai:gemini-one", "v1:12:jetbrains-ai:gpt-two",
+                  "v1:12:jetbrains-ai:unknown-three"]
+        session = {**_result(*values), "sessionId": "session"}
+        class Input:
+            def write(self, line):
+                sent.append(json.loads(line))
+            async def drain(self):
+                pass
+        class Output:
+            async def readline(self):
+                req = sent[-1]
+                if req["id"] == 1:
+                    result = {}
+                elif req["id"] == 2:
+                    result = session
+                else:
+                    value = req["params"]["value"]
+                    options = {values[0]: ["low", "medium", "high"],
+                               values[1]: ["none", "low", "xhigh", "max"]}.get(value)
+                    result = {"configOptions": [{"id": "model", "currentValue": value}]}
+                    if options:
+                        result["configOptions"].append({"id": "effort", "type": "select",
+                            "category": "thought_level", "options": [{"value": v} for v in options]})
+                return (json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result}) + "\n").encode()
+        class Process:
+            stdin, stdout, returncode = Input(), Output(), None
+            def kill(self):
+                pass
+            async def wait(self):
+                pass
+        async def spawn(*args, **kwargs):
+            return Process()
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        result = await discovery._fetch("junie", "/tmp")
+        assert result["jetbrains:gemini-one"]["reasoning_efforts"] == ["low", "medium", "high"]
+        assert result["jetbrains:gpt-two"]["reasoning_efforts"] == ["none", "low", "xhigh", "max"]
+        assert "reasoning_efforts" not in result["jetbrains:unknown-three"]
+        assert [r["params"]["value"] for r in sent[2:]] == values
+    asyncio.run(scenario())
+
+
+def test_selected_efforts_require_matching_model_and_valid_options():
+    response = {"configOptions": [
+        {"id": "model", "currentValue": "model-a"},
+        {"id": "effort", "type": "select", "category": "thought_level",
+         "options": [{"value": "low"}, {"value": "high"}]},
+    ]}
+    assert discovery._selected_efforts(response, "model-b") is None
+    assert discovery._selected_efforts(response, "model-a") == ["low", "high"]
+    response["configOptions"][1]["options"].append({"value": None})
+    assert discovery._selected_efforts(response, "model-a") is None
+
+
+def test_effort_probe_timeout_returns_model_snapshot(monkeypatch):
+    import json
+
+    async def scenario():
+        sent = []
+        class Input:
+            def write(self, line):
+                sent.append(json.loads(line))
+            async def drain(self):
+                pass
+        class Output:
+            async def readline(self):
+                req = sent[-1]
+                if req["id"] == 3:
+                    await asyncio.Event().wait()
+                result = {} if req["id"] == 1 else {
+                    **_result("v1:12:jetbrains-ai:gpt-one", "v1:12:jetbrains-ai:gpt-two"),
+                    "sessionId": "session"}
+                return (json.dumps({"id": req["id"], "result": result}) + "\n").encode()
+        class Process:
+            stdin, stdout, returncode = Input(), Output(), None
+            def kill(self):
+                pass
+            async def wait(self):
+                pass
+        async def spawn(*args, **kwargs):
+            return Process()
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(discovery, "_PROBE_TIMEOUT", 0.001)
+        result = await discovery._fetch("junie", "/tmp")
+        assert len(result) == 2
+        assert all("reasoning_efforts" not in model for model in result.values())
+        assert len(sent) == 3
     asyncio.run(scenario())

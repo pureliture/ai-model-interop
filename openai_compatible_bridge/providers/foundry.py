@@ -893,6 +893,7 @@ class FoundryChatClient:
 
                 delta_text = ""
                 delta_tool_calls: list[dict[str, Any]] | None = None
+                delta_thinking_blocks: list[dict[str, Any]] | None = None
                 finish_reason: str | None = None
                 normalized_usage: dict[str, int] | None = None
                 google_native_parts = None
@@ -1012,6 +1013,8 @@ class FoundryChatClient:
                         ) if key in usage}
                     elif event_type == "content_block_start":
                         cb = event.get("content_block", {}) or {}
+                        if cb.get("type") == "redacted_thinking" and isinstance(cb.get("data"), str):
+                            delta_thinking_blocks = [{"type": "redacted_thinking", "data": cb["data"]}]
                         if cb.get("type") == "tool_use":
                             block_idx = event.get("index", 0)
                             tool_idx = len(anthropic_tool_call_map)
@@ -1033,6 +1036,16 @@ class FoundryChatClient:
                         delta_type = delta.get("type")
                         if delta_type == "text_delta":
                             delta_text = str(delta.get("text", ""))
+                        elif delta_type == "thinking_delta":
+                            thinking = delta.get("thinking", "")
+                            if isinstance(thinking, str) and thinking:
+                                delta_thinking_blocks = [{"type": "thinking", "thinking": thinking,
+                                                          "signature": ""}]
+                        elif delta_type == "signature_delta":
+                            signature = delta.get("signature", "")
+                            if isinstance(signature, str) and signature:
+                                delta_thinking_blocks = [{"type": "thinking", "thinking": "",
+                                                          "signature": signature}]
                         elif delta_type == "input_json_delta":
                             block_idx = event.get("index", 0)
                             tool_idx = anthropic_tool_call_map.get(block_idx, 0)
@@ -1210,7 +1223,8 @@ class FoundryChatClient:
                             stage="provider_sse_error", upstream_status=response.status_code,
                         )
 
-                if delta_text or delta_tool_calls or finish_reason is not None or normalized_usage is not None:
+                if (delta_text or delta_tool_calls or delta_thinking_blocks
+                        or finish_reason is not None or normalized_usage is not None):
                     event_dict: dict[str, Any] = {
                         "delta_text": delta_text,
                         "finish_reason": finish_reason,
@@ -1218,6 +1232,8 @@ class FoundryChatClient:
                     }
                     if delta_tool_calls:
                         event_dict["delta_tool_calls"] = delta_tool_calls
+                    if delta_thinking_blocks:
+                        event_dict["thinking_blocks"] = delta_thinking_blocks
                     if google_native_parts:
                         event_dict["_google_call_parts"] = google_native_parts
                     yield event_dict

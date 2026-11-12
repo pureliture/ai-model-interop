@@ -20,6 +20,7 @@ import httpx
 from openai_compatible_bridge.providers.jetbrains_oauth import JetBrainsOAuthError, JetBrainsOAuthStore
 
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
+from openai_compatible_bridge.core.images import normalize_content
 from openai_compatible_bridge.core.provider_adapter import (
     map_http_error_for_provider,
     parse_foundry_usage,
@@ -27,7 +28,6 @@ from openai_compatible_bridge.core.provider_adapter import (
 from openai_compatible_bridge.core.transforms import (
     _anthropic_usage,
     _append_anthropic_turn,
-    _clamp_xai_reasoning_effort,
     _google_contents_and_system,
     _google_json_object,
     _google_response_result,
@@ -86,11 +86,41 @@ def _grazie_headers(llm_model: str, token: str) -> dict[str, str]:
     return headers
 
 
+def _anthropic_thinking_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert replayed OpenAI-compatible thinking_blocks to Anthropic blocks."""
+    blocks: list[dict[str, Any]] = []
+    for block in message.get("thinking_blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "thinking":
+            thinking = block.get("thinking", "")
+            signature = block.get("signature", "")
+            if isinstance(thinking, str) and isinstance(signature, str) and (thinking or signature):
+                blocks.append({"type": "thinking", "thinking": thinking, "signature": signature})
+        elif block.get("type") == "redacted_thinking":
+            data = block.get("data", "")
+            if isinstance(data, str) and data:
+                blocks.append({"type": "redacted_thinking", "data": data})
+    return blocks
+
+
 def validate_jetbrains_parameters(protocol: str, *, reasoning_effort: str | None = None,
                                    parallel_tool_calls: bool | None = None,
                                    response_format: dict[str, Any] | None = None) -> None:
     if reasoning_effort is not None:
-        raise VertexAPIError(400, "reasoning_effort is not supported for JetBrains.", code="unsupported_parameter")
+        known = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+        supported = {
+            JETBRAINS_OPENAI_PROTOCOL: known,
+            JETBRAINS_XAI_PROTOCOL: {"low", "medium", "high", "xhigh"},
+            JETBRAINS_ANTHROPIC_PROTOCOL: {"low", "medium", "high", "xhigh", "max"},
+            JETBRAINS_GOOGLE_PROTOCOL: {"low", "medium", "high"},
+        }.get(protocol)
+        if supported is None:
+            raise VertexAPIError(400, "reasoning_effort is not supported for this JetBrains protocol.", code="unsupported_parameter")
+        if reasoning_effort not in supported:
+            if reasoning_effort not in known:
+                raise VertexAPIError(400, "Invalid reasoning_effort for JetBrains.", code="invalid_request_error")
+            raise VertexAPIError(400, "reasoning_effort is not supported for this JetBrains protocol.", code="unsupported_parameter")
     if protocol in {JETBRAINS_ANTHROPIC_PROTOCOL, JETBRAINS_GOOGLE_PROTOCOL} and parallel_tool_calls is not None:
         raise VertexAPIError(400, "parallel_tool_calls is not supported for this JetBrains protocol.", code="unsupported_parameter")
     if protocol == JETBRAINS_ANTHROPIC_PROTOCOL and response_format is not None:
@@ -223,6 +253,7 @@ class JetBrainsChatClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
+        reasoning_effort: str | None = None,
         stream: bool,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -230,6 +261,8 @@ class JetBrainsChatClient:
             "input": _xai_input_messages(messages),
             "stream": stream,
         }
+        if reasoning_effort is not None:
+            body["reasoning"] = {"effort": reasoning_effort}
         if max_tokens is not None:
             body["max_output_tokens"] = max_tokens
         if temperature is not None:
@@ -286,6 +319,7 @@ class JetBrainsChatClient:
         stream: bool,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         system_parts: list[str] = []
         chat_messages: list[dict[str, Any]] = []
@@ -293,12 +327,28 @@ class JetBrainsChatClient:
             role = str(message.get("role", "user"))
             content = message.get("content")
             if role == "system":
-                if content:
-                    system_parts.append(_extract_message_text(content))
+                blocks = normalize_content(content)
+                if any(block["type"] == "image" for block in blocks):
+                    raise VertexAPIError(
+                        400, "Images are supported only in user messages.",
+                        code="invalid_request_error", stage="messages",
+                    )
+                text = "".join(block["text"] for block in blocks if block["type"] == "text")
+                if text:
+                    system_parts.append(text)
             elif role == "assistant":
+                if isinstance(content, list) and any(
+                    isinstance(block, dict) and block.get("type") in {"image_url", "input_image"}
+                    for block in content
+                ):
+                    raise VertexAPIError(
+                        400, "Images are supported only in user messages.",
+                        code="invalid_request_error", stage="messages",
+                    )
                 tool_calls = message.get("tool_calls")
-                if tool_calls:
-                    blocks: list[dict[str, Any]] = []
+                thinking = _anthropic_thinking_blocks(message)
+                if tool_calls or thinking:
+                    blocks: list[dict[str, Any]] = list(thinking)
                     if content:
                         text = _extract_message_text(content)
                         if text:
@@ -340,7 +390,20 @@ class JetBrainsChatClient:
                 else:
                     chat_messages.append({"role": "user", "content": [result_block]})
             else:
-                chat_messages.append({"role": role, "content": content})
+                if not isinstance(content, list):
+                    chat_messages.append({"role": role, "content": content})
+                    continue
+                blocks = normalize_content(content)
+                mapped: list[dict[str, Any]] = []
+                for block in blocks:
+                    if block["type"] == "text":
+                        mapped.append({"type": "text", "text": block["text"]})
+                    else:
+                        mapped.append({"type": "image", "source": {
+                            "type": "base64", "media_type": block["mime_type"],
+                            "data": block["data"],
+                        }})
+                chat_messages.append({"role": role, "content": mapped})
 
         body: dict[str, Any] = {
             "model": model,
@@ -356,6 +419,9 @@ class JetBrainsChatClient:
             body["top_p"] = top_p
         if stop is not None:
             body["stop_sequences"] = [stop] if isinstance(stop, str) else list(stop)
+        if reasoning_effort is not None:
+            body["output_config"] = {"effort": reasoning_effort}
+            body["thinking"] = {"type": "adaptive"}
         if tools is not None:
             grazie_tools: list[dict[str, Any]] = []
             for t in tools:
@@ -395,6 +461,7 @@ class JetBrainsChatClient:
         response_format: dict[str, Any] | None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         contents, system_parts = _google_contents_and_system(messages)
         body: dict[str, Any] = {"contents": contents}
@@ -409,6 +476,8 @@ class JetBrainsChatClient:
             generation_config["topP"] = top_p
         if stop is not None:
             generation_config["stopSequences"] = [stop] if isinstance(stop, str) else list(stop)
+        if reasoning_effort is not None:
+            generation_config["thinkingConfig"] = {"thinkingLevel": reasoning_effort.upper()}
         _apply_response_format(generation_config, response_format)
         if generation_config:
             body["generationConfig"] = generation_config
@@ -451,6 +520,7 @@ class JetBrainsChatClient:
                 tools=tools,
                 tool_choice=tool_choice,
                 parallel_tool_calls=parallel_tool_calls,
+                reasoning_effort=reasoning_effort,
                 stream=stream,
             )
         if protocol == JETBRAINS_ANTHROPIC_PROTOCOL:
@@ -464,6 +534,7 @@ class JetBrainsChatClient:
                 stream=stream,
                 tools=tools,
                 tool_choice=tool_choice,
+                reasoning_effort=reasoning_effort,
             )
         if protocol == JETBRAINS_GOOGLE_PROTOCOL:
             return self._build_google_request_body(
@@ -475,6 +546,7 @@ class JetBrainsChatClient:
                 response_format=response_format,
                 tools=tools,
                 tool_choice=tool_choice,
+                reasoning_effort=reasoning_effort,
             )
         raise VertexAPIError(503, f"Unsupported protocol: {protocol}", code="provider_config_error")
 
@@ -542,11 +614,20 @@ class JetBrainsChatClient:
             # Anthropic response → OpenAI format
             content = payload.get("content", [])
             text_parts = []
+            thinking_blocks = []
             tool_calls = None
             for block in content if isinstance(content, list) else []:
                 if isinstance(block, dict):
                     if block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "thinking":
+                        thinking_blocks.append({
+                            "type": "thinking",
+                            "thinking": block.get("thinking", ""),
+                            "signature": block.get("signature", ""),
+                        })
+                    elif block.get("type") == "redacted_thinking":
+                        thinking_blocks.append({"type": "redacted_thinking", "data": block.get("data", "")})
                     elif block.get("type") == "tool_use":
                         if tool_calls is None:
                             tool_calls = []
@@ -568,6 +649,7 @@ class JetBrainsChatClient:
                     "completion_tokens": int(usage.get("output_tokens", 0) or 0),
                     "total_tokens": int(usage.get("input_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0),
                 },
+                **({"thinking_blocks": thinking_blocks} if thinking_blocks else {}),
             }
         else:
             # OpenAI Responses API → OpenAI Chat Completions format

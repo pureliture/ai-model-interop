@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
+from openai_compatible_bridge.core.images import data_url, normalize_content
 from openai_compatible_bridge.providers.vertex import (
     VertexAPIError,
     _extract_message_text,
@@ -227,9 +228,25 @@ def _xai_input_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     )
             elif not content:
                 input_items.append({"role": "assistant", "content": ""})
-        elif role == "system":
-            text = _extract_message_text(content) if content is not None else ""
-            input_items.append({"role": "system", "content": text})
+        elif role in {"system", "developer", "user"}:
+            blocks = normalize_content(content)
+            if any(block["type"] == "image" for block in blocks):
+                if role != "user":
+                    raise VertexAPIError(
+                        400, "Images are supported only in user messages.",
+                        code="invalid_request_error", stage="messages",
+                    )
+                parts: list[dict[str, Any]] = []
+                for block in blocks:
+                    if block["type"] == "text":
+                        parts.append({"type": "input_text", "text": block["text"]})
+                    else:
+                        parts.append({"type": "input_image", "detail": "auto",
+                                      "image_url": data_url(block)})
+                input_items.append({"role": role, "content": parts})
+            else:
+                text = "".join(block["text"] for block in blocks if block["type"] == "text")
+                input_items.append({"role": role, "content": text})
         else:
             text = _extract_message_text(content) if content is not None else ""
             input_items.append({"role": role, "content": text})
@@ -265,7 +282,13 @@ def _google_function_call_part(tool_call: dict[str, Any]) -> tuple[dict[str, Any
     native = tool_call.get("_google_part")
     if isinstance(native, dict) and isinstance(native.get("functionCall"), dict):
         return native, name
-    return {"functionCall": {"name": name, "args": args}}, name
+    part: dict[str, Any] = {"functionCall": {"name": name, "args": args}}
+    extra = tool_call.get("extra_content") if isinstance(tool_call, dict) else None
+    google = extra.get("google") if isinstance(extra, dict) else None
+    signature = google.get("thought_signature") if isinstance(google, dict) else None
+    if isinstance(signature, str) and signature:
+        part["thoughtSignature"] = signature
+    return part, name
 
 
 def _google_contents_and_system(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -279,14 +302,26 @@ def _google_contents_and_system(messages: list[dict[str, Any]]) -> tuple[list[di
         role = str(message.get("role", "user"))
         content = message.get("content")
         if role == "system":
-            text = _extract_message_text(content) if content is not None else ""
+            blocks = normalize_content(content)
+            if any(block["type"] == "image" for block in blocks):
+                raise VertexAPIError(
+                    400, "Images are supported only in user messages.",
+                    code="invalid_request_error", stage="messages",
+                )
+            text = "".join(block["text"] for block in blocks if block["type"] == "text")
             if text:
                 system_parts.append({"text": text})
             continue
 
         if role == "assistant":
+            blocks = normalize_content(content)
+            if any(block["type"] == "image" for block in blocks):
+                raise VertexAPIError(
+                    400, "Images are supported only in user messages.",
+                    code="invalid_request_error", stage="messages",
+                )
             parts: list[dict[str, Any]] = []
-            text = _extract_message_text(content) if content is not None else ""
+            text = "".join(block["text"] for block in blocks if block["type"] == "text")
             if text:
                 parts.append({"text": text})
             for tool_call in message.get("tool_calls") or []:
@@ -319,12 +354,53 @@ def _google_contents_and_system(messages: list[dict[str, Any]]) -> tuple[list[di
                 contents.append({"role": "user", "parts": [part]})
             continue
 
-        text = _extract_message_text(content) if content is not None else ""
-        contents.append({"role": "user", "parts": [{"text": text}]})
+        blocks = normalize_content(content)
+        parts: list[dict[str, Any]] = []
+        for block in blocks:
+            if block["type"] == "text":
+                parts.append({"text": block["text"]})
+            else:
+                parts.append({"inlineData": {"mimeType": block["mime_type"], "data": block["data"]}})
+        contents.append({"role": "user", "parts": parts or [{"text": ""}]})
 
     if not contents:
         contents.append({"role": "user", "parts": [{"text": ""}]})
     return contents, system_parts
+
+
+_GOOGLE_SCHEMA_FIELDS = (
+    "type", "format", "title", "description", "nullable", "enum", "minimum", "maximum",
+    "minItems", "maxItems", "minLength", "maxLength", "minProperties", "maxProperties",
+    "pattern", "propertyOrdering", "required",
+)
+
+
+def _google_schema(value: Any) -> dict[str, Any]:
+    """Project JSON Schema onto Google's Schema proto without unsupported fields."""
+    if not isinstance(value, dict):
+        return {"type": "string"}
+    out = {key: value[key] for key in _GOOGLE_SCHEMA_FIELDS if key in value}
+    schema_type = out.get("type")
+    if isinstance(schema_type, list):
+        non_null = [item for item in schema_type if isinstance(item, str) and item != "null"]
+        if len(non_null) == 1:
+            out["type"] = non_null[0]
+            if "null" in schema_type:
+                out["nullable"] = True
+        else:
+            out.pop("type", None)
+            out["anyOf"] = [_google_schema({"type": item}) for item in non_null] or [{"type": "string"}]
+    if "required" in out:
+        properties = value.get("properties") if isinstance(value.get("properties"), dict) else {}
+        out["required"] = [name for name in out["required"]
+                           if isinstance(name, str) and name in properties]
+    if isinstance(value.get("properties"), dict):
+        out["properties"] = {name: _google_schema(spec) for name, spec in value["properties"].items()}
+    if isinstance(value.get("items"), dict):
+        out["items"] = _google_schema(value["items"])
+    if isinstance(value.get("anyOf"), list):
+        out["anyOf"] = [_google_schema(item) for item in value["anyOf"]]
+    return out
 
 
 def _google_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -343,7 +419,7 @@ def _google_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | 
             declaration["description"] = str(description)
         parameters = function.get("parameters")
         if parameters is not None:
-            declaration["parameters"] = parameters
+            declaration["parameters"] = _google_schema(parameters)
         declarations.append(declaration)
     return [{"functionDeclarations": declarations}] if declarations else None
 
@@ -434,13 +510,15 @@ def _google_response_result(
                         code="context_compaction_native_limit", stage="collector_buffer",
                     )
                 native_parts[call_id] = part
-            tool_calls.append(
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
-                }
-            )
+            tool_call = {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+            }
+            signature = part.get("thoughtSignature")
+            if isinstance(signature, str) and signature:
+                tool_call["extra_content"] = {"google": {"thought_signature": signature}}
+            tool_calls.append(tool_call)
 
     if tool_calls:
         finish_reason = "tool_calls"

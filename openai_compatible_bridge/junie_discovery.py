@@ -10,6 +10,10 @@ from typing import Any
 
 _PREFIX = "v1:12:jetbrains-ai:"
 _NATIVE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+_EFFORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_PROBE_BUDGET = 4.0
+_PROBE_TIMEOUT = 0.5
+_MAX_MODEL_PROBES = 64
 
 
 def _protocol(native: str) -> str | None:
@@ -60,7 +64,29 @@ def parse_models(result: Any) -> dict[str, dict[str, Any]]:
     return models
 
 
+def _selected_efforts(result: Any, expected: str) -> list[str] | None:
+    """Return only effort values explicitly reported for the selected model."""
+    if not isinstance(result, dict) or not isinstance(result.get("configOptions"), list):
+        return None
+    options = result["configOptions"]
+    if not any(isinstance(o, dict) and o.get("id") == "model" and
+               o.get("currentValue") == expected for o in options):
+        return None
+    for option in options:
+        if not isinstance(option, dict) or option.get("id") != "effort" or option.get("category") != "thought_level" or option.get("type") != "select":
+            continue
+        entries = option.get("options")
+        if not isinstance(entries, list) or not entries:
+            return None
+        values = [entry.get("value") if isinstance(entry, dict) else None for entry in entries]
+        if any(not isinstance(value, str) or not _EFFORT.fullmatch(value) for value in values):
+            return None
+        return list(dict.fromkeys(values))
+    return None
+
+
 async def _fetch(command: str, cwd: str) -> dict[str, dict[str, Any]]:
+    deadline = time.monotonic() + _PROBE_BUDGET
     proc = await asyncio.create_subprocess_exec(
         command, "--acp=true", "--skip-update-check", cwd=cwd,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -88,7 +114,30 @@ async def _fetch(command: str, cwd: str) -> dict[str, dict[str, Any]]:
     try:
         await request(1, "initialize", {"protocolVersion": 1, "clientCapabilities": {}})
         result = await request(2, "session/new", {"cwd": cwd, "mcpServers": []})
-        return parse_models(result)
+        models = parse_models(result)
+        session_id = result.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            return models
+        for identifier, (name, model) in enumerate(list(models.items())[:_MAX_MODEL_PROBES], start=3):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            value = _PREFIX + model["provider_model"]
+            try:
+                selected = await asyncio.wait_for(request(identifier, "session/set_config_option", {
+                    "sessionId": session_id, "configId": "model", "value": value,
+                }), timeout=min(_PROBE_TIMEOUT, remaining))
+            except asyncio.TimeoutError:
+                # A late reply would leave the stream out of sync; keep the snapshot.
+                break
+            except OSError:
+                break
+            except (ValueError, json.JSONDecodeError):
+                continue
+            efforts = _selected_efforts(selected, value)
+            if efforts is not None:
+                models[name]["reasoning_efforts"] = efforts
+        return models
     finally:
         if proc.returncode is None:
             try:
