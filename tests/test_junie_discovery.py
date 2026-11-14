@@ -353,17 +353,49 @@ def test_parse_models_keeps_acp_display_names():
 
 def test_jar_rows_distinguish_null_output_cap_from_missing_limits():
     stdout = (
-        b"gemini-4-argon\t1048576\t\n"
-        b"claude-sonnet-5\t1000000\t128000\n"
-        b"grok-4.7\t\t\n"
-        b"gpt-6-luna\t1000000\t0\n"
+        b"gemini-4-argon\t1048576\t\t1\n"
+        b"claude-sonnet-5\t1000000\t128000\t1\n"
+        b"grok-4.7\t\t\t0\n"
+        b"gpt-6-luna\t1000000\t0\t0\n"
+        b"legacy-three-columns\t1000000\t128000\n"
     )
     assert discovery._jar_limits(stdout) == {
-        "gemini-4-argon": {"context_length": 1048576, "max_tokens_unspecified": True},
-        "claude-sonnet-5": {"context_length": 1000000, "max_tokens": 128000},
-        "grok-4.7": {"max_tokens_unspecified": True},
-        "gpt-6-luna": {"context_length": 1000000},
+        "gemini-4-argon": {"context_length": 1048576, "max_tokens_unspecified": True, "image": True},
+        "claude-sonnet-5": {"context_length": 1000000, "max_tokens": 128000, "image": True},
+        "grok-4.7": {"max_tokens_unspecified": True, "image": False},
+        "gpt-6-luna": {"context_length": 1000000, "image": False},
+        "legacy-three-columns": {"context_length": 1000000, "max_tokens": 128000},
     }
+
+
+def test_jar_vision_advertises_images_without_manual_allowlist(monkeypatch):
+    async def fetch(*args):
+        return discovery.parse_models(_named_result(
+            ("v1:12:jetbrains-ai:gemini-4-hydrogen", "Gemini 4 Hydrogen"),
+            ("v1:12:jetbrains-ai:grok-code-fast", "Grok Code Fast"),
+            ("v1:12:jetbrains-ai:gemini-unknown", "Gemini Unknown"),
+        ))
+    async def metadata(pattern):
+        return {
+            "gemini-4-hydrogen": {"context_length": 1048576, "max_tokens_unspecified": True, "image": True},
+            "grok-code-fast": {"context_length": 256000, "max_tokens_unspecified": True, "image": False},
+        }
+    monkeypatch.setenv("JUNIE_DISCOVERY_JAR", "/installed/junie.jar")
+    monkeypatch.delenv("JETBRAINS_AI_IMAGE_MODELS", raising=False)
+    monkeypatch.setattr(discovery, "_fetch", fetch)
+    monkeypatch.setattr(discovery, "_jar_metadata", metadata)
+    monkeypatch.setattr(main, "discovery_from_env", lambda: discovery.JunieDiscovery(enabled=True))
+    app = _app_with_discovery(_FakeJetBrains())
+    with TestClient(app) as client:
+        rows = {row["id"]: row for row in client.get("/v1/models").json()["data"]}
+        assert rows["jetbrains:gemini-4-hydrogen"]["input"] == ["text", "image"]
+        assert rows["jetbrains:gemini-4-hydrogen"]["capabilities"]["images"] is True
+        assert "input" not in rows["jetbrains:grok-code-fast"]
+        assert "input" not in rows["jetbrains:gemini-unknown"]
+        monkeypatch.setenv("JETBRAINS_AI_IMAGE_MODELS", "grok-code-fast,gemini-unknown")
+        rows = {row["id"]: row for row in client.get("/v1/models").json()["data"]}
+        assert rows["jetbrains:grok-code-fast"]["input"] == ["text", "image"]
+        assert rows["jetbrains:gemini-unknown"]["input"] == ["text", "image"]
 
 
 def _app_with_discovery(fake):

@@ -156,17 +156,19 @@ async def _fetch(command: str, cwd: str) -> dict[str, dict[str, Any]]:
 
 
 def _jar_limits(stdout: bytes) -> dict[str, dict[str, Any]]:
-    """Parse the helper's `native<TAB>context<TAB>output` rows.
+    """Parse the helper's `native<TAB>context<TAB>output<TAB>vision` rows.
 
     The helper leaves the output column empty only for a null maxOutputTokens;
     a model missing from the JAR produces no row at all, and a JAR the probe
     could not read produces no output. Keeping those cases apart is what lets
     request handling drop a client default without dropping an explicit cap.
+    The vision column is `1`/`0`; older helpers print three columns only, which
+    leaves image support unknown.
     """
     metadata: dict[str, dict[str, Any]] = {}
     for line in stdout.decode("utf-8", errors="replace").splitlines():
         fields = line.split("\t")
-        if len(fields) != 3 or not _NATIVE.fullmatch(fields[0]):
+        if len(fields) < 3 or len(fields) > 4 or not _NATIVE.fullmatch(fields[0]):
             continue
         limits: dict[str, Any] = {}
         context = fields[1]
@@ -177,6 +179,11 @@ def _jar_limits(stdout: bytes) -> dict[str, dict[str, Any]]:
             limits["max_tokens"] = int(output)
         elif output == "":
             limits["max_tokens_unspecified"] = True
+        if len(fields) == 4:
+            if fields[3] == "1":
+                limits["image"] = True
+            elif fields[3] == "0":
+                limits["image"] = False
         if limits:
             metadata[fields[0]] = limits
     return metadata

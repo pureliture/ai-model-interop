@@ -267,7 +267,7 @@ JetBrains AI는 Grazie Gateway를 통해 OpenAI, Anthropic (Claude), xAI (Grok),
 * 동적 모델: `jetbrains:<native-model>` prefix로 registry 없이 직접 호출 가능 (예: `jetbrains:gpt-5.4`)
 * 과금: `COST_PROVIDER_BILLING_JSON`에 `"jetbrains"` 키를 실제 계약(`subscription` 등)으로 분류한다.
 * reasoning override: OpenAI·Grok Responses는 `reasoning.effort`, Anthropic Messages는 `output_config.effort`와 adaptive thinking, Google generateContent는 `thinkingConfig.thinkingLevel`로 전달한다. Anthropic·Google도 Junie CLI가 반환한 모델별 ACP `effort` 선택지를 그대로 discovery `/v1/models`의 `supported_reasoning_levels`로 광고한다. Anthropic thinking 서명과 Google `thoughtSignature`는 tool-call 대화에 왕복 보존한다. Claude는 `xhigh/max`, Google은 CLI가 제공하는 `low/medium/high`까지 실제 호출로 확인했다. Grok의 `none`과 `reasoning`의 다른 속성은 검증되지 않아 거부한다.
-* 이미지 입력: OpenAI/xAI Responses(`input_image`), Anthropic Messages(`image` base64), Google generateContent(`inlineData`)로 전달한다. base64 `data:` 이미지만 허용하고 원격 URL은 SSRF 방지를 위해 거부한다. PNG/JPEG/WebP/GIF, 이미지당 10MiB, 요청당 최대 8개·20MiB로 제한한다. Anthropic ingress도 base64 이미지 블록을 지원한다. Junie ACP는 이미지 지원 여부를 제공하지 않으므로 OMP discovery에 이미지 지원을 광고하려면 실호출로 검증한 모델 ID를 `JETBRAINS_AI_IMAGE_MODELS`(쉼표 구분, `jetbrains:` prefix 선택)에 지정한다. 미지정 모델은 텍스트 전용으로 광고된다.
+* 이미지 입력: OpenAI/xAI Responses(`input_image`), Anthropic Messages(`image` base64), Google generateContent(`inlineData`)로 전달한다. base64 `data:` 이미지만 허용하고 원격 URL은 SSRF 방지를 위해 거부한다. PNG/JPEG/WebP/GIF, 이미지당 10MiB, 요청당 최대 8개·20MiB로 제한한다. Anthropic ingress도 base64 이미지 블록을 지원한다. Junie JAR의 모델별 `ModelCapabilities.getVision()`을 읽어 `JUNIE_DISCOVERY_JAR`가 설정된 경우 이미지 지원을 자동으로 광고하므로, Junie 업데이트로 새 모델이 추가되면 별도 등록 없이 반영된다. JAR를 읽지 못하거나 JAR에 없는 모델은 `JETBRAINS_AI_IMAGE_MODELS`(쉼표 구분, `jetbrains:` prefix 선택)로 수동 지정할 수 있고, 미지정 모델은 텍스트 전용으로 광고된다.
 
 #### Junie ACP 모델 탐색과 OMP 연결
 

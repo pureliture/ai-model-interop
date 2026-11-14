@@ -1128,7 +1128,8 @@ def _discovered_jetbrains_model_object(model_id: str, cfg: dict[str, Any]) -> di
         # `metadata.display_name`; this keeps JetBrains' "Claude Sonnet 5.5"
         # spelling instead of the hyphenated native id.
         obj["metadata"] = {"display_name": display_name.strip()}
-    if model_id in _jetbrains_image_models():
+    image_support = cfg.get("image") is True or model_id in _jetbrains_image_models()
+    if image_support:
         obj["input"] = ["text", "image"]
         obj["capabilities"] = {"images": True, "streaming": True}
     protocol = cfg.get("protocol")
