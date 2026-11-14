@@ -12,9 +12,10 @@ class JunieModelMetadata {
             var capabilities = model.getCapabilities();
             Integer context = capabilities.getMaxContextTokens();
             Integer output = capabilities.getMaxOutputTokens();
-            if (context != null || output != null) {
+            boolean vision = capabilities.getVision() != null;
+            if (context != null || output != null || vision) {
                 System.out.println(model.getName() + "\t" + (context == null ? "" : context)
-                        + "\t" + (output == null ? "" : output));
+                        + "\t" + (output == null ? "" : output) + "\t" + (vision ? "1" : "0"));
             }
         }
     }
