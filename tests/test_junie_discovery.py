@@ -337,3 +337,98 @@ def test_effort_probe_timeout_returns_model_snapshot(monkeypatch):
         assert all("reasoning_efforts" not in model for model in result.values())
         assert len(sent) == 3
     asyncio.run(scenario())
+
+
+def test_parse_models_keeps_acp_display_names():
+    result = {"configOptions": [{"id": "model", "options": [{"group": "jetbrains-ai", "options": [
+        {"value": "v1:12:jetbrains-ai:claude-sonnet-5-5", "name": "  Claude   Sonnet 5.5 "},
+        {"value": "v1:12:jetbrains-ai:gpt-6-luna", "name": ""},
+        {"value": "v1:12:jetbrains-ai:grok-4.7"},
+    ]}]}]}
+    parsed = discovery.parse_models(result)
+    assert parsed["jetbrains:claude-sonnet-5-5"]["display_name"] == "Claude Sonnet 5.5"
+    assert "display_name" not in parsed["jetbrains:gpt-6-luna"]
+    assert "display_name" not in parsed["jetbrains:grok-4.7"]
+
+
+def test_jar_rows_distinguish_null_output_cap_from_missing_limits():
+    stdout = (
+        b"gemini-4-argon\t1048576\t\n"
+        b"claude-sonnet-5\t1000000\t128000\n"
+        b"grok-4.7\t\t\n"
+        b"gpt-6-luna\t1000000\t0\n"
+    )
+    assert discovery._jar_limits(stdout) == {
+        "gemini-4-argon": {"context_length": 1048576, "max_tokens_unspecified": True},
+        "claude-sonnet-5": {"context_length": 1000000, "max_tokens": 128000},
+        "grok-4.7": {"max_tokens_unspecified": True},
+        "gpt-6-luna": {"context_length": 1000000},
+    }
+
+
+def _app_with_discovery(fake):
+    app = main.create_app(embedding_client_factory=_FakeProvider, chat_client_factory=_FakeProvider,
+        rerank_client_factory=_FakeProvider, ollama_chat_client_factory=_FakeProvider,
+        foundry_chat_client_factory=_FakeProvider, jetbrains_chat_client_factory=lambda: fake,
+        cost_accounting_factory=lambda: None)
+    return app
+
+
+def _named_result(*entries):
+    return {"configOptions": [{"id": "model", "options": [{"group": "jetbrains-ai", "options": [
+        {"value": value, "name": name} for value, name in entries
+    ]}]}]}
+
+
+def test_listing_exposes_acp_display_name_metadata(monkeypatch):
+    async def fetch(*args):
+        return discovery.parse_models(_named_result(
+            ("v1:12:jetbrains-ai:claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("v1:12:jetbrains-ai:gemini-4-argon", "Gemini 4 Argon"),
+        ))
+    monkeypatch.setattr(discovery, "_fetch", fetch)
+    monkeypatch.setattr(main, "discovery_from_env", lambda: discovery.JunieDiscovery(enabled=True))
+    app = _app_with_discovery(_FakeJetBrains())
+    with TestClient(app) as client:
+        rows = {row["id"]: row for row in client.get("/v1/models").json()["data"]}
+        assert rows["jetbrains:claude-sonnet-5-5"]["metadata"] == {"display_name": "Claude Sonnet 5.5"}
+        assert client.get("/v1/models/jetbrains:claude-sonnet-5-5").json()["metadata"] == {
+            "display_name": "Claude Sonnet 5.5"
+        }
+
+
+def test_discovery_default_max_tokens_is_dropped_only_for_null_output_caps(monkeypatch):
+    async def fetch(*args):
+        return discovery.parse_models(_named_result(
+            ("v1:12:jetbrains-ai:gemini-4-argon", "Gemini 4 Argon"),
+            ("v1:12:jetbrains-ai:claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("v1:12:jetbrains-ai:gpt-6-astra", "GPT 6 Astra"),
+        ))
+    async def metadata(pattern):
+        assert pattern == "/installed/junie.jar"
+        return {
+            "gemini-4-argon": {"context_length": 1048576, "max_tokens_unspecified": True},
+            "claude-sonnet-5-5": {"context_length": 1000000, "max_tokens": 128000},
+        }
+    monkeypatch.setenv("JUNIE_DISCOVERY_JAR", "/installed/junie.jar")
+    monkeypatch.setattr(discovery, "_fetch", fetch)
+    monkeypatch.setattr(discovery, "_jar_metadata", metadata)
+    monkeypatch.setattr(main, "discovery_from_env", lambda: discovery.JunieDiscovery(enabled=True))
+    fake = _FakeJetBrains()
+    app = _app_with_discovery(fake)
+    with TestClient(app) as client:
+        def ask(model, max_tokens, stream=False):
+            body = {"model": model, "max_tokens": max_tokens,
+                    "messages": [{"role": "user", "content": "hello"}]}
+            if stream:
+                body["stream"] = True
+            assert client.post("/v1/chat/completions", json=body).status_code == 200
+            return fake.calls[-1]
+
+        assert ask("jetbrains:gemini-4-argon", 32768)["max_tokens"] is None
+        assert ask("jetbrains:gemini-4-argon", 4096)["max_tokens"] == 4096
+        assert ask("jetbrains:gemini-4-argon", 32768, stream=True)["max_tokens"] is None
+        # A JAR-declared cap keeps the client value even at the default.
+        assert ask("jetbrains:claude-sonnet-5-5", 32768)["max_tokens"] == 32768
+        # A model the JAR did not report is not treated as null.
+        assert ask("jetbrains:gpt-6-astra", 32768)["max_tokens"] == 32768

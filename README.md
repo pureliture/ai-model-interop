@@ -277,6 +277,10 @@ ACP의 `model` 옵션에서 `jetbrains-ai` 그룹의 `v1:12:jetbrains-ai:<native
 
 선택적으로 `JUNIE_DISCOVERY_JAR`에 **ACP 실행과 동일한 Junie 버전**의 JAR 경로 또는 단일 파일에 일치하는 glob을 지정하면 JAR의 모델별 `maxContextTokens`와 `maxOutputTokens`를 읽어, ACP에서 발견된 동일 ID에만 각각 `context_length`와 `max_tokens`로 노출한다. Java 소스 실행을 지원하는 JDK가 필요하며 `JUNIE_DISCOVERY_JAVA`로 Java 실행 파일을 지정할 수 있다. JAR 탐색·실행 실패 또는 값이 없는 경우 해당 한도는 생략되며 클라이언트 기본값이 적용될 수 있다. Junie 내부 클래스 형식은 버전에 따라 변경될 수 있고, Junie 설정값은 Grazie 서버의 실제 한도를 보증하지 않는다.
 
+`/v1/models` 행은 ACP가 제공하는 표시 이름(`Claude Sonnet 5.5` 등)을 `metadata.display_name`으로 함께 노출한다. OMP `openai-models-list` discovery는 이 값을 모델 이름으로 사용하므로, 하이픈으로 정규화된 native ID(`claude-sonnet-5-5`) 대신 원래 표기를 표시한다.
+
+JAR가 해당 모델의 `maxOutputTokens`를 **null**로 선언한 경우, 브리지는 그 사실을 요청 처리에 반영한다. `openai-models-list` 클라이언트(OMP)는 출력 한도를 광고하지 않는 행에 discovery 기본값 32768을 적용해 `max_tokens`를 전송하는데, 이 값이 그대로 upstream에 전달되면 Gateway가 허용하는 실제 한도보다 낮게 생성을 자를 수 있다. 그래서 `max_tokens`/`max_completion_tokens`가 정확히 32768이고 JAR가 null을 선언한 모델이면 브리지는 출력 한도 필드를 생략하고 한도 판단을 Gateway에 맡긴다. JAR 조회 실패·모델 미일치는 null과 구분하므로 이 동작을 적용하지 않는다. 클라이언트가 32768을 명시적으로 선택한 경우도 같은 값이므로 구분할 수 없다.
+
 탐색되지 않은 `jetbrains:<native>` 직접 호출은 기존 동작대로 기본 OpenAI 프로토콜을 사용한다. 이 동작은 임의 ID에 대한 호환성 보장이 아니며, 다른 프로토콜이 필요하면 registry에 명시해야 한다.
 
 모델 발견 기능은 Junie 프로세스를 통해 목록만 조회하며 자격 증명을 직접 읽지 않는다. 기존 Grazie 채팅 경로에는 별도의 인증이 필요하다. 인증·모델 사용 권한과 upstream ID는 실제 호출로 별도 확인해야 한다.

@@ -511,6 +511,30 @@ def _chat_max_tokens(payload: OpenAIChatRequest) -> int | None:
     return payload.max_tokens
 
 
+# openai-models-list discovery default that clients (OMP) apply to rows with no
+# advertised output cap. JetBrains models whose installed Junie build declares a
+# null maxOutputTokens would otherwise be capped at this value on the wire.
+DISCOVERY_DEFAULT_MAX_OUTPUT_TOKENS = 32768
+
+
+def _effective_max_tokens(requested: int | None, provider: str, resolved_config: dict[str, Any] | None) -> int | None:
+    """Drop the client discovery default when Junie declares no output cap.
+
+    Only the exact discovery default is treated as "unset": an explicitly chosen
+    value, even one equal to the default by chance, is indistinguishable on the
+    wire, so this trades that rare ambiguity for not silently truncating
+    generation on models whose real cap the gateway alone knows.
+    """
+    if (
+        requested == DISCOVERY_DEFAULT_MAX_OUTPUT_TOKENS
+        and provider == "jetbrains"
+        and isinstance(resolved_config, dict)
+        and resolved_config.get("max_tokens_unspecified") is True
+    ):
+        return None
+    return requested
+
+
 def _chat_forecast_usage(payload: OpenAIChatRequest) -> NormalizedUsage:
     prompt_tokens = sum(_estimate_text_tokens(message.content) for message in payload.messages)
     requested_max_tokens = _chat_max_tokens(payload)
@@ -1098,6 +1122,12 @@ def _discovered_jetbrains_model_object(model_id: str, cfg: dict[str, Any]) -> di
         value = cfg.get(key)
         if type(value) is int and value > 0:
             obj[key] = value
+    display_name = cfg.get("display_name")
+    if isinstance(display_name, str) and display_name.strip():
+        # OMP's openai-models-list discovery reads the display label from
+        # `metadata.display_name`; this keeps JetBrains' "Claude Sonnet 5.5"
+        # spelling instead of the hyphenated native id.
+        obj["metadata"] = {"display_name": display_name.strip()}
     if model_id in _jetbrains_image_models():
         obj["input"] = ["text", "image"]
         obj["capabilities"] = {"images": True, "streaming": True}
@@ -1373,7 +1403,7 @@ def _chat_completions_stream(
                 stream_kwargs = {
                     "model": provider_model or payload.model,
                     "messages": messages,
-                    "max_tokens": _chat_max_tokens(payload),
+                    "max_tokens": _effective_max_tokens(_chat_max_tokens(payload), provider, resolved_config),
                     "temperature": payload.temperature,
                     "top_p": payload.top_p,
                     "stop": payload.stop,
@@ -1678,7 +1708,7 @@ async def create_chat_completions(
             generate_kwargs = {
                 "model": provider_model,
                 "messages": messages,
-                "max_tokens": _chat_max_tokens(payload),
+                "max_tokens": _effective_max_tokens(_chat_max_tokens(payload), provider, _chat_cfg),
                 "temperature": payload.temperature,
                 "top_p": payload.top_p,
                 "stop": payload.stop,
@@ -1768,7 +1798,7 @@ def _anthropic_generate_kwargs(
     generate_kwargs: dict[str, Any] = {
         "model": provider_model,
         "messages": params["messages"],
-        "max_tokens": params["max_tokens"],
+        "max_tokens": _effective_max_tokens(params["max_tokens"], provider, resolved_config),
         "temperature": params["temperature"],
         "top_p": params["top_p"],
         "stop": params["stop"],
