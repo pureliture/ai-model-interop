@@ -12,6 +12,7 @@ import httpx
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
+from openai_compatible_bridge.core.http_timeout import http_timeout_seconds
 from openai_compatible_bridge.core.embedding_resilience import EmbeddingRetryPolicy, embedding_max_inflight
 from openai_compatible_bridge.core.provider_adapter import (
     map_http_error_for_provider,
@@ -22,7 +23,7 @@ CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 TOKEN_REFRESH_SKEW_SECONDS = int(os.getenv("TOKEN_REFRESH_SKEW_SECONDS", "300"))
-HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "60"))
+HTTP_TIMEOUT_SECONDS = http_timeout_seconds()
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "8"))
 VERTEX_AUTO_TRUNCATE = os.getenv("VERTEX_AUTO_TRUNCATE", "true").lower() in {"1", "true", "yes", "on"}
 DEFAULT_MAX_INSTANCES = int(os.getenv("DEFAULT_MAX_INSTANCES", "1"))

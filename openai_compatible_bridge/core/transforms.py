@@ -62,27 +62,6 @@ def _openai_error_from_payload(payload: Any) -> tuple[str, str | None] | None:
     return None
 
 
-def _parse_foundry_error(response: httpx.Response) -> VertexAPIError:
-    try:
-        payload = response.json()
-    except Exception:
-        payload = {"error": {"message": response.text}}
-
-    parsed = _openai_error_from_payload(payload)
-    if parsed is None:
-        message = "Foundry request failed."
-        code = str(response.status_code)
-    else:
-        message, code = parsed
-
-    return VertexAPIError(
-        response.status_code,
-        message=message,
-        code=code,
-        raw=payload,
-        stage="provider_http_status",
-        upstream_status=response.status_code,
-    )
 
 
 def _usage(prompt_tokens: Any, completion_tokens: Any, total_tokens: Any = None) -> dict[str, int]:
@@ -468,10 +447,10 @@ def _google_response_result(
     payload: Any, *, used_call_ids: set[str] | None = None, max_tokens: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
-        raise VertexAPIError(502, "Malformed Foundry Google response: expected object", code="bad_gateway")
+        raise VertexAPIError(502, "Malformed Google response: expected object", code="bad_gateway")
     candidates = payload.get("candidates")
     if not isinstance(candidates, list) or not candidates:
-        raise VertexAPIError(502, "Malformed Foundry Google response: missing candidates[]", code="bad_gateway")
+        raise VertexAPIError(502, "Malformed Google response: missing candidates[]", code="bad_gateway")
 
     candidate = candidates[0] if isinstance(candidates[0], dict) else {}
     content = candidate.get("content", {}) if isinstance(candidate.get("content", {}), dict) else {}

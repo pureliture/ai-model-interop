@@ -8,7 +8,6 @@ import httpx
 import pytest
 
 from openai_compatible_bridge.providers import jetbrains_oauth
-from openai_compatible_bridge.providers.foundry import FoundryChatClient
 from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient
 from openai_compatible_bridge.providers.jetbrains_oauth import JetBrainsOAuthError, JetBrainsOAuthStore
 
@@ -86,8 +85,6 @@ def test_generate_and_stream_use_request_specific_tokens(monkeypatch):
         async def access_token(self):
             return "refreshed-token"
 
-    async def fake_stream(self, **kwargs):
-        yield self._headers("openai_responses")["Authorization"]
 
     async def run():
         client = JetBrainsChatClient(token="")
@@ -96,16 +93,17 @@ def test_generate_and_stream_use_request_specific_tokens(monkeypatch):
 
         async def handler(request):
             captured.append(request.headers["authorization"])
+            if json.loads(request.content).get("stream"):
+                return httpx.Response(200, text='data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
             return httpx.Response(200, json={"output": [], "usage": {}})
 
         await client.http.aclose()
         client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        monkeypatch.setattr(FoundryChatClient, "stream_chat", fake_stream)
         await client.generate(model="model", messages=[])
         events = [event async for event in client.stream_chat(model="model", messages=[])]
         await client.close()
-        assert captured == ["Bearer refreshed-token"]
-        assert events == ["Bearer refreshed-token"]
+        assert captured == ["Bearer refreshed-token", "Bearer refreshed-token"]
+        assert events[-1]["finish_reason"] == "stop"
         assert client.token == ""
 
     asyncio.run(run())
@@ -127,8 +125,6 @@ def test_concurrent_generate_and_stream_share_refreshed_token(tmp_path, monkeypa
             time.sleep(0.02)
             return httpx.Response(200, json={"access_token": "fresh", "refresh_token": "rotated", "expires_in": 3600})
 
-    async def fake_stream(self, **kwargs):
-        yield self._headers("openai_responses")["Authorization"]
 
     async def run():
         client = JetBrainsChatClient(token="")
@@ -137,6 +133,8 @@ def test_concurrent_generate_and_stream_share_refreshed_token(tmp_path, monkeypa
 
         async def handler(request):
             captured.append(request.headers["authorization"])
+            if json.loads(request.content).get("stream"):
+                return httpx.Response(200, text='data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
             return httpx.Response(200, json={"output": [], "usage": {}})
 
         await client.http.aclose()
@@ -148,11 +146,10 @@ def test_concurrent_generate_and_stream_share_refreshed_token(tmp_path, monkeypa
         results = await asyncio.gather(*(client.generate(model="model", messages=[]) for _ in range(8)),
                                        *(stream() for _ in range(8)))
         await client.close()
-        assert captured == ["Bearer fresh"] * 8
-        assert results[8:] == [["Bearer fresh"]] * 8
+        assert captured == ["Bearer fresh"] * 16
+        assert all(events[-1]["finish_reason"] == "stop" for events in results[8:])
 
     monkeypatch.setattr(jetbrains_oauth.httpx, "Client", FakeClient)
-    monkeypatch.setattr(FoundryChatClient, "stream_chat", fake_stream)
     asyncio.run(run())
     assert len(refresh_calls) == 1
 

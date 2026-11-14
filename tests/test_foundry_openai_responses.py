@@ -12,9 +12,9 @@ from fastapi.testclient import TestClient
 
 import openai_compatible_bridge.providers.vertex as vertex
 from openai_compatible_bridge.main import create_app
+from openai_compatible_bridge.core.transforms import _clamp_xai_reasoning_effort
 from openai_compatible_bridge.providers.foundry import (
     FoundryChatClient,
-    _clamp_xai_reasoning_effort,
 )
 from openai_compatible_bridge.providers.vertex import VertexAPIError
 
