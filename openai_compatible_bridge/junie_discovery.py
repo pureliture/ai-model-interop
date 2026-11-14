@@ -57,10 +57,16 @@ def parse_models(result: Any) -> dict[str, dict[str, Any]]:
                 native = value[len(_PREFIX):]
                 if not _NATIVE.fullmatch(native) or any(part in {".", ".."} for part in native.split("/")):
                     continue
-                models["jetbrains:" + native] = {
+                model: dict[str, Any] = {
                     "provider": "jetbrains", "kind": "chat",
                     "provider_model": native, "protocol": _protocol(native),
                 }
+                label = entry.get("name")
+                if isinstance(label, str):
+                    display = " ".join(label.split())
+                    if display and len(display) <= 120:
+                        model["display_name"] = display
+                models["jetbrains:" + native] = model
     if not found_group:
         raise ValueError("missing JetBrains AI model group")
     return models
@@ -149,8 +155,39 @@ async def _fetch(command: str, cwd: str) -> dict[str, dict[str, Any]]:
         await proc.wait()
 
 
-async def _jar_metadata(pattern: str) -> dict[str, dict[str, int]]:
-    """Read token limits from an explicitly configured, unambiguous Junie JAR."""
+def _jar_limits(stdout: bytes) -> dict[str, dict[str, Any]]:
+    """Parse the helper's `native<TAB>context<TAB>output` rows.
+
+    The helper leaves the output column empty only for a null maxOutputTokens;
+    a model missing from the JAR produces no row at all, and a JAR the probe
+    could not read produces no output. Keeping those cases apart is what lets
+    request handling drop a client default without dropping an explicit cap.
+    """
+    metadata: dict[str, dict[str, Any]] = {}
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or not _NATIVE.fullmatch(fields[0]):
+            continue
+        limits: dict[str, Any] = {}
+        context = fields[1]
+        if context.isascii() and context.isdigit() and 0 < int(context) <= 100_000_000:
+            limits["context_length"] = int(context)
+        output = fields[2]
+        if output.isascii() and output.isdigit() and 0 < int(output) <= 100_000_000:
+            limits["max_tokens"] = int(output)
+        elif output == "":
+            limits["max_tokens_unspecified"] = True
+        if limits:
+            metadata[fields[0]] = limits
+    return metadata
+
+
+async def _jar_metadata(pattern: str) -> dict[str, dict[str, Any]]:
+    """Read token limits from an explicitly configured, unambiguous Junie JAR.
+
+    A model the JAR lists with an empty output column declares *no* output cap,
+    which is distinct from a model (or a JAR) the probe could not read.
+    """
     jars = glob.glob(os.path.expanduser(pattern))
     if len(jars) != 1:
         return {}
@@ -172,18 +209,7 @@ async def _jar_metadata(pattern: str) -> dict[str, dict[str, int]]:
             await proc.wait()
     if proc.returncode != 0 or len(stdout) > 1024 * 1024:
         return {}
-    metadata: dict[str, dict[str, int]] = {}
-    for line in stdout.decode("utf-8", errors="replace").splitlines():
-        fields = line.split("\t")
-        if len(fields) != 3 or not _NATIVE.fullmatch(fields[0]):
-            continue
-        limits: dict[str, int] = {}
-        for key, value in zip(("context_length", "max_tokens"), fields[1:]):
-            if value.isascii() and value.isdigit() and 0 < int(value) <= 100_000_000:
-                limits[key] = int(value)
-        if limits:
-            metadata[fields[0]] = limits
-    return metadata
+    return _jar_limits(stdout)
 
 
 class JunieDiscovery:
