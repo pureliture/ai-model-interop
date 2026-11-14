@@ -20,10 +20,12 @@ import httpx
 from openai_compatible_bridge.providers.jetbrains_oauth import JetBrainsOAuthError, JetBrainsOAuthStore
 
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
+from openai_compatible_bridge.core.http_timeout import http_timeout_seconds
+from openai_compatible_bridge.core.protocol_stream import ProtocolStream
 from openai_compatible_bridge.core.images import normalize_content
 from openai_compatible_bridge.core.provider_adapter import (
     map_http_error_for_provider,
-    parse_foundry_usage,
+    parse_protocol_usage,
 )
 from openai_compatible_bridge.core.transforms import (
     _anthropic_usage,
@@ -51,9 +53,7 @@ from openai_compatible_bridge.providers.vertex import (
 
 JETBRAINS_AI_BASE_URL = os.getenv("JETBRAINS_AI_BASE_URL", "https://ingrazzio-cloud-prod.labs.jb.gg").strip().rstrip("/")
 JETBRAINS_AI_TOKEN = os.getenv("JETBRAINS_AI_TOKEN", "").strip()
-HTTP_TIMEOUT_SECONDS = float(
-    (os.getenv("JETBRAINS_AI_HTTP_TIMEOUT_SECONDS") or os.getenv("HTTP_TIMEOUT_SECONDS") or "60")
-)
+HTTP_TIMEOUT_SECONDS = http_timeout_seconds("JETBRAINS_AI_HTTP_TIMEOUT_SECONDS")
 
 # 프로토콜 상수
 JETBRAINS_OPENAI_PROTOCOL = "openai_responses"
@@ -139,12 +139,13 @@ class JetBrainsChatClient:
     """
 
     provider_name = "jetbrains"
+    provider_label = "JetBrains"
 
     def parse_usage(self, payload: Any, endpoint: str) -> NormalizedUsage | None:
-        return parse_foundry_usage(payload, endpoint)
+        return parse_protocol_usage(payload, endpoint)
 
     def map_http_error(self, response: httpx.Response) -> VertexAPIError:
-        return map_http_error_for_provider("openai_compatible", response)
+        return map_http_error_for_provider(self.provider_name, response)
 
     def __init__(
         self,
@@ -155,7 +156,7 @@ class JetBrainsChatClient:
         self.base_url = (base_url if base_url is not None else JETBRAINS_AI_BASE_URL).strip().rstrip("/")
         self.token = token if token is not None else JETBRAINS_AI_TOKEN
         oauth_path = os.getenv("JETBRAINS_AI_OAUTH_FILE", "").strip()
-        self.oauth_store = JetBrainsOAuthStore(oauth_path, timeout=HTTP_TIMEOUT_SECONDS) if oauth_path and token is None and not self.token else None
+        self.oauth_store = JetBrainsOAuthStore(oauth_path) if oauth_path and token is None and not self.token else None
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS))
 
     async def close(self) -> None:
@@ -696,14 +697,11 @@ class JetBrainsChatClient:
         reasoning_effort: str | None = None,
         **_: Any,
     ):
-        # Both gateways use the same native protocol event formats. Reuse the
-        # established parser while keeping JetBrains URLs, headers and bodies.
-        from openai_compatible_bridge.providers.foundry import FoundryChatClient
 
         native_model = (resolved_config or {}).get("provider_model", model)
         request_client = copy.copy(self)
         request_client.token = await self._request_token()
-        async for event in FoundryChatClient.stream_chat(
+        async for event in ProtocolStream.stream_chat(
             request_client, model=native_model, messages=messages, max_tokens=max_tokens,
             temperature=temperature, top_p=top_p, stop=stop,
             response_format=response_format, resolved_config=resolved_config,

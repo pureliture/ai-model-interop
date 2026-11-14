@@ -10,6 +10,7 @@ from jsonschema import exceptions as jsonschema_exceptions
 from jsonschema.validators import validator_for
 
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
+from openai_compatible_bridge.core.http_timeout import http_timeout_seconds
 from openai_compatible_bridge.core.provider_adapter import (
     map_http_error_for_provider,
     parse_ollama_usage,
@@ -17,7 +18,7 @@ from openai_compatible_bridge.core.provider_adapter import (
 from openai_compatible_bridge.providers.vertex import VertexAPIError
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-HTTP_TIMEOUT_SECONDS = float((os.getenv("OLLAMA_HTTP_TIMEOUT_SECONDS") or os.getenv("HTTP_TIMEOUT_SECONDS") or "60"))
+HTTP_TIMEOUT_SECONDS = http_timeout_seconds("OLLAMA_HTTP_TIMEOUT_SECONDS")
 
 
 def _ollama_think_from_env(value: str | None) -> bool | str | None:

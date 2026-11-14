@@ -138,8 +138,8 @@ def parse_ollama_usage(payload: Any, endpoint: str) -> NormalizedUsage | None:
     return None
 
 
-def parse_foundry_usage(payload: Any, endpoint: str) -> NormalizedUsage | None:
-    """Foundry provider가 emit할 수 있는 shape만 처리한다.
+def parse_protocol_usage(payload: Any, endpoint: str) -> NormalizedUsage | None:
+    """Parse usage emitted by the supported native chat protocols.
 
     openai_chat_completions / anthropic_messages / xai_responses /
     openai_responses / google_generate_content의 raw payload를 커버한다.
@@ -194,11 +194,11 @@ def parse_usage_for_provider(provider: str | None, payload: Any, endpoint: str) 
     if provider == "ollama":
         return parse_ollama_usage(payload, endpoint)
     if provider == "foundry":
-        return parse_foundry_usage(payload, endpoint)
+        return parse_protocol_usage(payload, endpoint)
     if provider in {"openai_compat", "openai_compatible"}:
         return parse_openai_compat_usage(payload, endpoint)
     if provider == "jetbrains":
-        return parse_foundry_usage(payload, endpoint)
+        return parse_protocol_usage(payload, endpoint)
     return None
 
 
@@ -268,7 +268,7 @@ def pricing_fallbacks(model: str) -> tuple[str, ...]:
 def map_http_error_for_provider(provider: str | None, response: Any) -> Any:
     """provider별 HTTP 에러 매핑. lazy import로 순환 참조를 피한다."""
     if provider == "foundry":
-        from openai_compatible_bridge.core.transforms import _parse_foundry_error
+        from openai_compatible_bridge.providers.foundry import _parse_foundry_error
 
         return _parse_foundry_error(response)
     if provider == "ollama":

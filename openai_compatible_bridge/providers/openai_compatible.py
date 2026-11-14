@@ -19,13 +19,14 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from openai_compatible_bridge.core.http_timeout import http_timeout_seconds
 from openai_compatible_bridge.core.provider_adapter import (
     map_http_error_for_provider,
     parse_openai_compat_usage,
 )
 from openai_compatible_bridge.providers.vertex import VertexAPIError
 
-HTTP_TIMEOUT_SECONDS = float(os.getenv("OPENAI_COMPAT_HTTP_TIMEOUT_SECONDS", os.getenv("HTTP_TIMEOUT_SECONDS", "60")))
+HTTP_TIMEOUT_SECONDS = http_timeout_seconds("OPENAI_COMPAT_HTTP_TIMEOUT_SECONDS")
 
 _HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 _RESERVED_HEADERS = frozenset({
@@ -105,7 +106,7 @@ class OpenAICompatibleChatClient:
     provider_name = "openai_compatible"
 
     def __init__(self, *, timeout_seconds: float | None = None) -> None:
-        self.http = httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds or HTTP_TIMEOUT_SECONDS))
+        self.http = httpx.AsyncClient(timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds))
 
     async def close(self) -> None:
         await self.http.aclose()

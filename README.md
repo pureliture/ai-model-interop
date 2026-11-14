@@ -353,14 +353,16 @@ Client 요청에는 provider field를 넣지 않습니다. `model` 값이 regist
 | `EMBEDDINGS_RETRY_MAX_ATTEMPTS` | `4` | Vertex embedding 429/503의 총 전송 시도 상한. 최초 전송 포함 `1..8`의 정수. `1`은 자동 재시도 비활성화. |
 | `EMBEDDINGS_RETRY_INITIAL_DELAY_SECONDS` | `1` | 최초 backoff의 기준 시간. 유한한 `0.01..30`초. 다음 기준 시간은 2배씩 증가하며 jitter ±20% 적용. |
 | `EMBEDDINGS_RETRY_MAX_DELAY_SECONDS` | `8` | 계산한 backoff의 상한. 유한한 `0.01..60`초이며 최초 기준 시간 이상. 더 긴 upstream `Retry-After`는 재시도 전체 시간 안에서 존중. |
-| `EMBEDDINGS_RETRY_TIMEOUT_SECONDS` | `30` | 최초 429/503 응답 이후 모든 재시도의 대기·HTTP 슬롯 획득·비용 admission·HTTP 전송을 합친 제한 시간. 유한한 `0.1..300`초. 최초 전송의 기존 HTTP timeout은 유지. |
+| `EMBEDDINGS_RETRY_TIMEOUT_SECONDS` | `30` | 최초 429/503 응답 이후 모든 재시도의 대기·HTTP 슬롯 획득·비용 admission·HTTP 전송을 합친 제한 시간. 유한한 `0.1..300`초. 최초 전송에는 선택적 HTTP timeout만 적용. |
 | `MODEL_REGISTRY_JSON` | `""` | Model alias registry override JSON. |
 | `EXTRA_MODELS` | `""` | Backward-compatible comma-separated Vertex predict model additions. |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama native API base URL. Docker에서는 `http://host.docker.internal:11434` 권장. |
 | `FOUNDRY_BASE_URL` | `""` | 고정된 Foundry OpenAI-compatible `/chat/completions` endpoint. `google_generate_content`는 이 URL의 host/root에서 Google native model endpoint를 안전하게 파생합니다. |
 | `FOUNDRY_TOKEN` | `""` | Foundry bearer token. 운영에서는 Kubernetes Secret 또는 로컬 `.env`에만 저장. |
-| `FOUNDRY_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | Foundry 전용 HTTP timeout. |
-| `OLLAMA_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | Ollama native API 전용 HTTP timeout. reasoning-heavy model은 더 길게 잡을 수 있음. |
+| `FOUNDRY_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | 선택적 Foundry HTTP timeout(초). |
+| `JETBRAINS_AI_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | 선택적 JetBrains HTTP timeout(초); OAuth 토큰 갱신 제한과 별개. |
+| `OLLAMA_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | 선택적 Ollama HTTP timeout(초). |
+| `OPENAI_COMPAT_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | 선택적 OpenAI 호환 upstream HTTP timeout(초). |
 | `OLLAMA_THINK` | `true` | Ollama `think` request field 기본값. `true`, `false`, `low`, `medium`, `high`, `omit` 지원. 요청별 `reasoning_effort`/`reasoning.effort`가 있으면 해당 요청에서 override. |
 | `STRUCTURED_OUTPUT_REPAIR_ENABLED` | `false` | Dynamic Ollama Cloud `json_schema` 실패에 한해 bounded repair chain 활성화. |
 | `STRUCTURED_OUTPUT_REPAIR_MODELS` | `ollama:qwen3.5:cloud,ollama:gemma4:31b-cloud,ollama:glm-5.2:cloud` | Repair 후보 모델 순서. 최대 3개만 사용하며 `metered` 후보의 각 HTTP 시도도 cost/budget gate를 통과해야 함. |
@@ -371,7 +373,7 @@ Client 요청에는 provider field를 넣지 않습니다. `model` 값이 regist
 | `VERTEX_AUTO_TRUNCATE` | `true` | Vertex embedding auto truncate flag. |
 | `TOKEN_REFRESH_SKEW_SECONDS` | `300` | Vertex access token을 만료 몇 초 전에 선갱신할지. |
 | `MAX_CONCURRENCY` | `8` | Vertex chat/rerank의 HTTP 동시 호출 상한. Vertex embedding은 `EMBEDDINGS_MAX_INFLIGHT`를 사용. |
-| `HTTP_TIMEOUT_SECONDS` | `60` | Provider HTTP timeout. |
+| `HTTP_TIMEOUT_SECONDS` | `""` (무제한) | Provider HTTP timeout(초). 미설정/빈 값이면 제한 없음. 숫자 지정 시 read timeout은 데이터 간 대기 시간에 적용. Provider별 값이 우선한다. |
 | `DEFAULT_MAX_INSTANCES` | `1` | 알 수 없는 Vertex predict model 호출 시 요청당 instance chunk 폴백. |
 | `COST_TRACKING_ENABLED` | `false` | 비용 추적과 forecast budget gate 활성화 여부. `false`는 명시적 보호 해제. |
 | `COST_PROVIDER_BILLING_JSON` | `""` | `vertex`/`ollama`/`foundry`의 실제 계약을 `metered`/`subscription`/`nonbillable`로 명시. 추정 기본값 없이 빈 값·누락·잘못된 분류는 fail-closed. |

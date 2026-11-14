@@ -11,6 +11,7 @@
     "TOKEN_REFRESH_SKEW_SECONDS": {"type": "integer", "min": 0, "max": 999999},
     "MAX_CONCURRENCY": {"type": "integer", "min": 1, "max": 9999999999},
     "HTTP_TIMEOUT_SECONDS": {"type": "number", "min": 0.01, "max": 3600},
+    "OPENAI_COMPAT_HTTP_TIMEOUT_SECONDS": {"type": "number", "min": 0.01, "max": 3600},
     "EMBEDDINGS_MAX_REQUEST_BYTES": {"type": "integer", "min": 1, "max": 9999999999},
     "EMBEDDINGS_MAX_INFLIGHT": {"type": "integer", "min": 1, "max": 9999999999},
     "EMBEDDINGS_QUEUE_TIMEOUT_SECONDS": {"type": "number", "min": 0},
