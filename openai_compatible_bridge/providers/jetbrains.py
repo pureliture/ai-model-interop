@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import copy
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -20,10 +21,14 @@ from openai_compatible_bridge.core.conversation_state import (
     ConversationStateCache,
     get_default_conversation_state_cache,
 )
+from openai_compatible_bridge.providers.jetbrains_oauth import JetBrainsOAuthError, JetBrainsOAuthStore
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
+from openai_compatible_bridge.core.http_timeout import http_timeout_seconds
+from openai_compatible_bridge.core.protocol_stream import ProtocolStream
+from openai_compatible_bridge.core.images import normalize_content
 from openai_compatible_bridge.core.provider_adapter import (
     map_http_error_for_provider,
-    parse_foundry_usage,
+    parse_protocol_usage,
 )
 from openai_compatible_bridge.core.transforms import (
     ANTHROPIC_THINKING_BUDGETS,
@@ -56,9 +61,7 @@ from openai_compatible_bridge.providers.vertex import (
 
 JETBRAINS_AI_BASE_URL = os.getenv("JETBRAINS_AI_BASE_URL", "https://ingrazzio-cloud-prod.labs.jb.gg").strip().rstrip("/")
 JETBRAINS_AI_TOKEN = os.getenv("JETBRAINS_AI_TOKEN", "").strip()
-HTTP_TIMEOUT_SECONDS = float(
-    (os.getenv("JETBRAINS_AI_HTTP_TIMEOUT_SECONDS") or os.getenv("HTTP_TIMEOUT_SECONDS") or "60")
-)
+HTTP_TIMEOUT_SECONDS = http_timeout_seconds("JETBRAINS_AI_HTTP_TIMEOUT_SECONDS")
 
 # 프로토콜 상수
 JETBRAINS_OPENAI_PROTOCOL = "openai_responses"
@@ -119,6 +122,24 @@ def _grazie_headers(
     return headers
 
 
+def _anthropic_thinking_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert replayed OpenAI-compatible thinking_blocks to Anthropic blocks."""
+    blocks: list[dict[str, Any]] = []
+    for block in message.get("thinking_blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "thinking":
+            thinking = block.get("thinking", "")
+            signature = block.get("signature", "")
+            if isinstance(thinking, str) and isinstance(signature, str) and (thinking or signature):
+                blocks.append({"type": "thinking", "thinking": thinking, "signature": signature})
+        elif block.get("type") == "redacted_thinking":
+            data = block.get("data", "")
+            if isinstance(data, str) and data:
+                blocks.append({"type": "redacted_thinking", "data": data})
+    return blocks
+
+
 def validate_jetbrains_parameters(
     protocol: str,
     *,
@@ -149,12 +170,13 @@ class JetBrainsChatClient:
     """
 
     provider_name = "jetbrains"
+    provider_label = "JetBrains"
 
     def parse_usage(self, payload: Any, endpoint: str) -> NormalizedUsage | None:
-        return parse_foundry_usage(payload, endpoint)
+        return parse_protocol_usage(payload, endpoint)
 
     def map_http_error(self, response: httpx.Response) -> VertexAPIError:
-        return map_http_error_for_provider("jetbrains", response)
+        return map_http_error_for_provider(self.provider_name, response)
 
     def __init__(
         self,
@@ -171,6 +193,8 @@ class JetBrainsChatClient:
         self.grazie_agent = grazie_agent
         self.state_cache = state_cache if state_cache is not None else get_default_conversation_state_cache()
         self._active_resolved_config: dict[str, Any] | None = None
+        oauth_path = os.getenv("JETBRAINS_AI_OAUTH_FILE", "").strip()
+        self.oauth_store = JetBrainsOAuthStore(oauth_path) if oauth_path and token is None and not self.token else None
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS))
 
     async def close(self) -> None:
@@ -252,6 +276,16 @@ class JetBrainsChatClient:
             auth_mode=cfg.get("auth_mode") or self.auth_mode,
             grazie_agent=cfg.get("grazie_agent") or self.grazie_agent,
         )
+
+    async def _request_token(self) -> str:
+        if self.token:
+            return self.token
+        if self.oauth_store is None:
+            raise VertexAPIError(503, "JETBRAINS_AI_TOKEN is not configured.", code="provider_config_error")
+        try:
+            return await self.oauth_store.access_token()
+        except JetBrainsOAuthError as exc:
+            raise VertexAPIError(503, str(exc), code="provider_auth_error") from None
 
     @staticmethod
     def _build_openai_request_body(
@@ -349,14 +383,28 @@ class JetBrainsChatClient:
             role = str(message.get("role", "user"))
             content = message.get("content")
             if role == "system":
-                if content:
-                    text = _extract_message_text(content)
-                    if text:
-                        system_parts.append(text)
+                blocks = normalize_content(content)
+                if any(block["type"] == "image" for block in blocks):
+                    raise VertexAPIError(
+                        400, "Images are supported only in user messages.",
+                        code="invalid_request_error", stage="messages",
+                    )
+                text = "".join(block["text"] for block in blocks if block["type"] == "text")
+                if text:
+                    system_parts.append(text)
             elif role == "assistant":
+                if isinstance(content, list) and any(
+                    isinstance(block, dict) and block.get("type") in {"image_url", "input_image"}
+                    for block in content
+                ):
+                    raise VertexAPIError(
+                        400, "Images are supported only in user messages.",
+                        code="invalid_request_error", stage="messages",
+                    )
                 tool_calls = message.get("tool_calls")
-                if tool_calls:
-                    blocks: list[dict[str, Any]] = []
+                thinking = _anthropic_thinking_blocks(message)
+                if tool_calls or thinking:
+                    blocks: list[dict[str, Any]] = list(thinking)
                     if content:
                         text = _extract_message_text(content)
                         if text:
@@ -399,7 +447,20 @@ class JetBrainsChatClient:
                     result_block["is_error"] = True
                 _append_anthropic_turn(chat_messages, "user", [result_block])
             else:
-                _append_anthropic_turn(chat_messages, "user", content if content is not None else "")
+                if not isinstance(content, list):
+                    _append_anthropic_turn(chat_messages, "user", content if content is not None else "")
+                    continue
+                blocks = normalize_content(content)
+                mapped: list[dict[str, Any]] = []
+                for block in blocks:
+                    if block["type"] == "text":
+                        mapped.append({"type": "text", "text": block["text"]})
+                    else:
+                        mapped.append({"type": "image", "source": {
+                            "type": "base64", "media_type": block["mime_type"],
+                            "data": block["data"],
+                        }})
+                _append_anthropic_turn(chat_messages, "user", mapped)
 
         if not chat_messages:
             chat_messages.append({"role": "user", "content": ""})
@@ -594,7 +655,10 @@ class JetBrainsChatClient:
         native_model = (resolved_config or {}).get("provider_model", model)
         protocol = self._protocol(resolved_config, model=native_model)
         url = self._url_for_protocol(protocol, model=native_model, stream=False)
-        headers = self._headers(protocol, resolved_config=resolved_config)
+        effective_headers_config = dict(resolved_config or {})
+        if not (effective_headers_config.get("api_key") or self.token or "").strip():
+            effective_headers_config["api_key"] = await self._request_token()
+        headers = self._headers(protocol, resolved_config=effective_headers_config)
         body = self._build_request_body(
             protocol=protocol,
             model=native_model,
@@ -638,11 +702,20 @@ class JetBrainsChatClient:
             # Anthropic response → OpenAI format
             content = payload.get("content", [])
             text_parts = []
+            thinking_blocks = []
             tool_calls = None
             for block in content if isinstance(content, list) else []:
                 if isinstance(block, dict):
                     if block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "thinking":
+                        thinking_blocks.append({
+                            "type": "thinking",
+                            "thinking": block.get("thinking", ""),
+                            "signature": block.get("signature", ""),
+                        })
+                    elif block.get("type") == "redacted_thinking":
+                        thinking_blocks.append({"type": "redacted_thinking", "data": block.get("data", "")})
                     elif block.get("type") == "tool_use":
                         if tool_calls is None:
                             tool_calls = []
@@ -664,6 +737,7 @@ class JetBrainsChatClient:
                     "completion_tokens": int(usage.get("output_tokens", 0) or 0),
                     "total_tokens": int(usage.get("input_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0),
                 },
+                **({"thinking_blocks": thinking_blocks} if thinking_blocks else {}),
             }
         else:
             # OpenAI Responses API → OpenAI Chat Completions format
@@ -710,18 +784,17 @@ class JetBrainsChatClient:
         reasoning_effort: str | None = None,
         **_: Any,
     ):
-        # Both gateways use the same native protocol event formats. Reuse the
-        # established parser while keeping JetBrains URLs, headers and bodies.
-        from openai_compatible_bridge.providers.foundry import FoundryChatClient
 
         native_model = (resolved_config or {}).get("provider_model", model)
         protocol = self._protocol(resolved_config, model=native_model)
         effective_config = {**(resolved_config or {}), "provider_model": native_model, "protocol": protocol}
-        prev_cfg = self._active_resolved_config
-        self._active_resolved_config = effective_config
+        request_client = copy.copy(self)
+        request_client.token = await self._request_token()
+        prev_cfg = request_client._active_resolved_config
+        request_client._active_resolved_config = effective_config
         try:
-            async for event in FoundryChatClient.stream_chat(
-                self, model=native_model, messages=messages, max_tokens=max_tokens,
+            async for event in ProtocolStream.stream_chat(
+                request_client, model=native_model, messages=messages, max_tokens=max_tokens,
                 temperature=temperature, top_p=top_p, stop=stop,
                 response_format=response_format, resolved_config=effective_config,
                 tools=tools, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
@@ -729,4 +802,4 @@ class JetBrainsChatClient:
             ):
                 yield event
         finally:
-            self._active_resolved_config = prev_cfg
+            request_client._active_resolved_config = prev_cfg

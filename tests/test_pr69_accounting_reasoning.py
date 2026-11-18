@@ -64,7 +64,17 @@ def test_jetbrains_ingress_rejects_unmappable_reasoning_object(stream):
     assert not fake.calls
 
 
-@pytest.mark.parametrize('protocol', ['openai_responses', 'xai_responses', 'anthropic_messages', 'google_generate_content'])
+@pytest.mark.parametrize('stream', [False, True])
+def test_jetbrains_ingress_rejects_unsupported_reasoning_option(stream):
+    fake = _FakeJetBrains()
+    app = create_app(embedding_client_factory=_FakeProvider, chat_client_factory=_FakeProvider, rerank_client_factory=_FakeProvider, ollama_chat_client_factory=_FakeProvider, foundry_chat_client_factory=_FakeProvider, jetbrains_chat_client_factory=lambda: fake, cost_accounting_factory=lambda: None)
+    with TestClient(app) as client:
+        response = client.post('/v1/chat/completions', json={'model': 'jetbrains:native', 'messages': [{'role': 'user', 'content': 'hi'}], 'stream': stream, 'reasoning': {'effort': 'high', 'summary': 'auto'}})
+    assert response.status_code == 400
+    assert not fake.calls
+
+
+@pytest.mark.parametrize('protocol', ['anthropic_messages', 'google_generate_content'])
 @pytest.mark.parametrize('stream', [False, True])
 def test_jetbrains_direct_client_rejects_unmappable_reasoning(protocol, stream):
     async def run():

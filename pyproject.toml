@@ -1,7 +1,7 @@
 [project]
 name = "openai-compatible-bridge"
 version = "0.1.0"
-description = "OpenAI-compatible bridge for provider-native model APIs"
+description = "Multi-protocol gateway for AI model APIs across providers"
 requires-python = ">=3.11"
 dependencies = [
     "cachetools>=5.5,<8",

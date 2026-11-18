@@ -117,7 +117,8 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
 
     - assistant tool_use -> tool_calls
     - user tool_result -> role=tool 메시지 (is_error는 extra로 보존)
-    - thinking/redacted_thinking -> 스킵, image 등 미디어 -> 400
+    - thinking/redacted_thinking -> 스킵
+    - user image(base64) -> OpenAI image_url data URL, 그 외 미디어 -> 400
     """
     if not isinstance(messages, list) or not messages:
         raise AnthropicBadRequest("messages must be a non-empty array.")
@@ -132,6 +133,10 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
         content = message.get("content")
 
         if role == "system":
+            if isinstance(content, list) and any(
+                isinstance(block, dict) and block.get("type") == "image" for block in content
+            ):
+                raise AnthropicBadRequest("Images are supported only in user messages.")
             text = _extract_text(content)
             openai_messages.append({"role": "system", "content": text})
             continue
@@ -143,6 +148,8 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
             raise AnthropicBadRequest(f"messages[{index}].content must be a string or an array.")
 
         text_parts: list[str] = []
+        user_blocks: list[dict[str, Any]] = []
+        has_images = False
         tool_calls: list[dict[str, Any]] = []
         tool_messages: list[dict[str, Any]] = []
         for block in content:
@@ -150,7 +157,23 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
                 raise AnthropicBadRequest(f"messages[{index}] content blocks must be objects.")
             block_type = block.get("type")
             if block_type == "text":
-                text_parts.append(str(block.get("text", "")))
+                text = str(block.get("text", ""))
+                text_parts.append(text)
+                user_blocks.append({"type": "text", "text": text})
+            elif block_type == "image":
+                if role != "user":
+                    raise AnthropicBadRequest("Images are supported only in user messages.")
+                source = block.get("source")
+                if not isinstance(source, dict) or source.get("type") != "base64":
+                    raise AnthropicBadRequest("Only base64 image sources are supported.")
+                media_type = source.get("media_type")
+                data = source.get("data")
+                if not isinstance(media_type, str) or not isinstance(data, str) or not data:
+                    raise AnthropicBadRequest("Base64 image sources require media_type and data.")
+                user_blocks.append({"type": "image_url", "image_url": {
+                    "url": f"data:{media_type};base64,{data}",
+                }})
+                has_images = True
             elif block_type == "thinking" or block_type == "redacted_thinking":
                 continue
             elif block_type == "tool_use":
@@ -198,7 +221,9 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
             openai_messages.append(entry)
         else:
             text = "".join(text_parts)
-            if text or not tool_messages:
+            if has_images:
+                openai_messages.append({"role": "user", "content": user_blocks})
+            elif text or not tool_messages:
                 openai_messages.append({"role": "user", "content": text})
             openai_messages.extend(tool_messages)
 

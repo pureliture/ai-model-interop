@@ -30,14 +30,13 @@ from fastapi.testclient import TestClient
 
 import openai_compatible_bridge.providers.vertex as vertex
 from openai_compatible_bridge.main import create_app
+from openai_compatible_bridge.core.transforms import _openai_error_from_payload, _unwrap_optional
 from openai_compatible_bridge.providers.foundry import (
     FOUNDRY_ANTHROPIC_PROTOCOL,
     FOUNDRY_OPENAI_PROTOCOL,
     FOUNDRY_XAI_RESPONSES_PROTOCOL,
     FoundryChatClient,
-    _openai_error_from_payload,
     _parse_foundry_error,
-    _unwrap_optional,
 )
 from openai_compatible_bridge.providers.vertex import VertexAPIError
 
