@@ -262,8 +262,7 @@ def _xai_input_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     if block["type"] == "text":
                         parts.append({"type": "input_text", "text": block["text"]})
                     else:
-                        parts.append({"type": "input_image", "detail": "auto",
-                                      "image_url": data_url(block)})
+                        parts.append({"type": "input_image", "image_url": data_url(block)})
                 input_items.append({"role": role, "content": parts})
             else:
                 text = "".join(block["text"] for block in blocks if block["type"] == "text")

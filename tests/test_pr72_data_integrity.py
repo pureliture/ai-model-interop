@@ -187,8 +187,8 @@ def test_usage_details_and_explicit_total_are_preserved():
         model="gpt-5",
     )
     usage = result["usage"]
-    assert usage.get("prompt_tokens_details", {}).get("cached_tokens") == 7
-    assert usage.get("completion_tokens_details", {}).get("reasoning_tokens") == 5
+    assert usage.get("input_tokens_details", {}).get("cached_tokens") == 7
+    assert usage.get("output_tokens_details", {}).get("reasoning_tokens") == 5
     assert usage["total_tokens"] == 0, "explicit upstream total was recomputed"
 
 

@@ -31,12 +31,8 @@ from openai_compatible_bridge.core.provider_adapter import (
     parse_protocol_usage,
 )
 from openai_compatible_bridge.core.transforms import (
-    ANTHROPIC_THINKING_BUDGETS,
-    GOOGLE_THINKING_BUDGETS,
-    STANDARD_REASONING_EFFORTS,
     _anthropic_usage,
     _append_anthropic_turn,
-    _clamp_xai_reasoning_effort,
     _google_contents_and_system,
     _google_json_object,
     _google_response_result,
@@ -44,7 +40,6 @@ from openai_compatible_bridge.core.transforms import (
     _google_tools,
     _google_usage,
     _map_finish_reason,
-    _normalize_standard_reasoning_effort,
     _openai_input_messages,
     _unwrap_optional,
     _usage,
@@ -154,9 +149,21 @@ def validate_jetbrains_parameters(
     response_format: dict[str, Any] | None = None,
 ) -> None:
     if reasoning_effort is not None:
-        _normalize_standard_reasoning_effort(reasoning_effort)
-    if parallel_tool_calls is not None and not isinstance(parallel_tool_calls, bool):
-        raise VertexAPIError(400, "parallel_tool_calls must be a boolean.", code="invalid_request_error")
+        known = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+        supported = {
+            JETBRAINS_OPENAI_PROTOCOL: known,
+            JETBRAINS_XAI_PROTOCOL: {"low", "medium", "high", "xhigh"},
+            JETBRAINS_ANTHROPIC_PROTOCOL: {"low", "medium", "high", "xhigh", "max"},
+            JETBRAINS_GOOGLE_PROTOCOL: {"low", "medium", "high"},
+        }.get(protocol)
+        if supported is None:
+            raise VertexAPIError(400, "reasoning_effort is not supported for this JetBrains protocol.", code="unsupported_parameter")
+        if reasoning_effort not in supported:
+            if reasoning_effort not in known:
+                raise VertexAPIError(400, "Invalid reasoning_effort for JetBrains.", code="invalid_request_error")
+            raise VertexAPIError(400, "reasoning_effort is not supported for this JetBrains protocol.", code="unsupported_parameter")
+    if protocol in {JETBRAINS_ANTHROPIC_PROTOCOL, JETBRAINS_GOOGLE_PROTOCOL} and parallel_tool_calls is not None:
+        raise VertexAPIError(400, "parallel_tool_calls is not supported for this JetBrains protocol.", code="unsupported_parameter")
     if protocol == JETBRAINS_ANTHROPIC_PROTOCOL and response_format is not None:
         raise VertexAPIError(400, "response_format is not supported for this JetBrains protocol.", code="unsupported_parameter")
     if (
@@ -340,14 +347,7 @@ class JetBrainsChatClient:
         if stop is not None:
             body["stop"] = stop
         if reasoning_effort is not None:
-            effort = _normalize_standard_reasoning_effort(reasoning_effort)
-            if effort is not None:
-                if protocol == JETBRAINS_XAI_PROTOCOL:
-                    clamped = _clamp_xai_reasoning_effort(effort)
-                    if clamped is not None:
-                        body["reasoning"] = {"effort": clamped}
-                else:
-                    body["reasoning"] = {"effort": "high" if effort == "max" else effort}
+            body["reasoning"] = {"effort": reasoning_effort}
         if response_format is not None:
             format_type = response_format.get("type")
             if format_type == "json_object":
@@ -397,7 +397,7 @@ class JetBrainsChatClient:
         reasoning_effort: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
-        parallel_tool_calls: bool | None = None,
+        **_: Any,
     ) -> dict[str, Any]:
         system_parts: list[str] = []
         chat_messages: list[dict[str, Any]] = []
@@ -474,30 +474,23 @@ class JetBrainsChatClient:
 
         if not chat_messages:
             chat_messages.append({"role": "user", "content": ""})
-
-        effective_effort = _normalize_standard_reasoning_effort(reasoning_effort)
-        effective_max_tokens = max_tokens or 4096
-        if effective_effort is not None:
-            budget = ANTHROPIC_THINKING_BUDGETS[effective_effort]
-            effective_max_tokens = max(max_tokens or 0, budget + 4096)
-
         body: dict[str, Any] = {
             "model": model,
             "messages": chat_messages,
-            "max_tokens": effective_max_tokens,
+            "max_tokens": max_tokens or 4096,
             "stream": stream,
         }
         if system_parts:
             body["system"] = "\n\n".join(system_parts)
-        if effective_effort is not None:
-            body["thinking"] = {"type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGETS[effective_effort]}
-        else:
-            if temperature is not None:
-                body["temperature"] = temperature
-            if top_p is not None:
-                body["top_p"] = top_p
+        if temperature is not None:
+            body["temperature"] = temperature
+        if top_p is not None:
+            body["top_p"] = top_p
         if stop is not None:
             body["stop_sequences"] = [stop] if isinstance(stop, str) else list(stop)
+        if reasoning_effort is not None:
+            body["output_config"] = {"effort": reasoning_effort}
+            body["thinking"] = {"type": "adaptive"}
         if tools is not None:
             grazie_tools: list[dict[str, Any]] = []
             for t in tools:
@@ -526,11 +519,6 @@ class JetBrainsChatClient:
                     anthropic_tool_choice = {"type": "tool", "name": name}
                 else:
                     anthropic_tool_choice = dict(tool_choice)
-        if parallel_tool_calls is False and tools:
-            if anthropic_tool_choice is None:
-                anthropic_tool_choice = {"type": "auto", "disable_parallel_tool_use": True}
-            elif anthropic_tool_choice.get("type") != "none":
-                anthropic_tool_choice = {**anthropic_tool_choice, "disable_parallel_tool_use": True}
         if anthropic_tool_choice is not None:
             body["tool_choice"] = anthropic_tool_choice
         return body
@@ -563,9 +551,7 @@ class JetBrainsChatClient:
         if stop is not None:
             generation_config["stopSequences"] = [stop] if isinstance(stop, str) else list(stop)
         if reasoning_effort is not None:
-            effort = _normalize_standard_reasoning_effort(reasoning_effort)
-            if effort is not None:
-                generation_config["thinkingConfig"] = {"thinkingBudget": GOOGLE_THINKING_BUDGETS[effort]}
+            generation_config["thinkingConfig"] = {"thinkingLevel": reasoning_effort.upper()}
         _apply_response_format(generation_config, response_format)
         if generation_config:
             body["generationConfig"] = generation_config

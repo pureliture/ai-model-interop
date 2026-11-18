@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 import openai_compatible_bridge.providers.vertex as vertex
 from openai_compatible_bridge.main import create_app
-from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient
+from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient, validate_jetbrains_parameters
 from openai_compatible_bridge.providers.vertex import VertexAPIError
 
 
@@ -215,7 +215,7 @@ def test_jetbrains_anthropic_consecutive_turn_merging_and_is_error() -> None:
         stop=None,
         stream=False,
         tools=[{"type": "function", "name": "shell", "description": "run", "parameters": {"type": "object"}}],
-        parallel_tool_calls=False,
+        tool_choice="auto",
     )
     assert body["system"] == "System 1\n\nSystem 2"
     # Tool and user messages merge into a single user turn.
@@ -233,11 +233,11 @@ def test_jetbrains_anthropic_consecutive_turn_merging_and_is_error() -> None:
     assert body["messages"][2]["content"][1] == {"type": "text", "text": "Please retry"}
     # Flat tool preserved
     assert body["tools"][0]["name"] == "shell"
-    assert body["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+    assert body["tool_choice"] == {"type": "auto"}
 
 
 def test_jetbrains_reasoning_effort_mapping_and_rejection() -> None:
-    # Anthropic thinking mapping + max_tokens adjustment + temperature stripped
+    # Anthropic passthrough: output_config.effort + adaptive thinking, no budget/max_tokens rewrite.
     anth_body = JetBrainsChatClient._build_anthropic_request_body(
         model="claude-sonnet-4-5",
         messages=[{"role": "user", "content": "think hard"}],
@@ -248,12 +248,13 @@ def test_jetbrains_reasoning_effort_mapping_and_rejection() -> None:
         stream=False,
         reasoning_effort="high",
     )
-    assert anth_body["thinking"] == {"type": "enabled", "budget_tokens": 16384}
-    assert anth_body["max_tokens"] == 16384 + 4096
-    assert "temperature" not in anth_body
-    assert "top_p" not in anth_body
+    assert anth_body["output_config"] == {"effort": "high"}
+    assert anth_body["thinking"] == {"type": "adaptive"}
+    assert anth_body["max_tokens"] == 1024
+    assert anth_body["temperature"] == 0.3
+    assert anth_body["top_p"] == 0.9
 
-    # OpenAI responses mapping
+    # OpenAI responses passthrough (no high/max rewrite).
     oai_body = JetBrainsChatClient._build_openai_request_body(
         model="gpt-5.4",
         messages=[{"role": "user", "content": "hi"}],
@@ -266,9 +267,9 @@ def test_jetbrains_reasoning_effort_mapping_and_rejection() -> None:
         protocol="openai_responses",
         stream=False,
     )
-    assert oai_body["reasoning"] == {"effort": "high"}
+    assert oai_body["reasoning"] == {"effort": "max"}
 
-    # xAI responses clamping
+    # xAI responses passthrough (no clamp to xhigh here; validation handles support).
     xai_body = JetBrainsChatClient._build_openai_request_body(
         model="grok-3",
         messages=[{"role": "user", "content": "hi"}],
@@ -277,13 +278,13 @@ def test_jetbrains_reasoning_effort_mapping_and_rejection() -> None:
         top_p=None,
         stop=None,
         response_format=None,
-        reasoning_effort="max",
+        reasoning_effort="high",
         protocol="xai_responses",
         stream=False,
     )
-    assert xai_body["reasoning"] == {"effort": "xhigh"}
+    assert xai_body["reasoning"] == {"effort": "high"}
 
-    # Google thinkingConfig mapping
+    # Google passthrough: thinkingLevel upper, no budget.
     google_body = JetBrainsChatClient._build_google_request_body(
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=512,
@@ -293,22 +294,13 @@ def test_jetbrains_reasoning_effort_mapping_and_rejection() -> None:
         response_format=None,
         reasoning_effort="medium",
     )
-    assert google_body["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 4096}
+    assert google_body["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "MEDIUM"}
 
-    # Unmappable effort rejected with 400
+    # Unknown effort rejected with invalid_request_error via the validation contract.
     with pytest.raises(VertexAPIError) as exc:
-        JetBrainsChatClient._build_anthropic_request_body(
-            model="claude-sonnet-4-5",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=1024,
-            temperature=None,
-            top_p=None,
-            stop=None,
-            stream=False,
-            reasoning_effort="ultracode",
-        )
+        validate_jetbrains_parameters("anthropic_messages", reasoning_effort="ultracode")
     assert exc.value.status_code == 400
-    assert exc.value.code == "unsupported_parameter"
+    assert exc.value.code == "invalid_request_error"
 
 
 def test_jetbrains_pricing_fallback_and_error_mapping() -> None:

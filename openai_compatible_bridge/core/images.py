@@ -128,6 +128,7 @@ def validate_messages(messages: list[dict[str, Any]], provider: str, protocol: s
             fields.add("name")
         if role == "assistant":
             fields.add("tool_calls")
+            fields.add("thinking_blocks")
         if role == "tool":
             fields.add("tool_call_id")
             if protocol == "anthropic_messages":
