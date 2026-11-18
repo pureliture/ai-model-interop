@@ -73,6 +73,7 @@ from openai_compatible_bridge.providers.jetbrains import (
     validate_jetbrains_parameters,
     validate_jetbrains_messages,
 )
+from openai_compatible_bridge.junie_discovery import discovery_from_env
 from openai_compatible_bridge.providers.ollama import OllamaChatClient
 from openai_compatible_bridge.providers.openai_compatible import (
     OpenAICompatibleChatClient,
@@ -261,7 +262,15 @@ def current_allowed_models() -> set[str]:
     return _main_allowed_models()
 
 
-def _resolve_chat_model(model: str) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+def _resolve_chat_model(model: str, discovered: dict[str, dict[str, Any]] | None = None) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    if model not in _vertex_allowed_models() and model in (discovered or {}):
+        cfg = discovered[model]
+        if cfg.get("protocol") is None:
+            return None, openai_error_response(
+                message="The discovered JetBrains model has an unsupported protocol; configure an explicit registry entry.",
+                status_code=400, error_type="invalid_request_error", code="unsupported_model", param="model",
+            )
+        return cfg, None
     if model.startswith(OLLAMA_DYNAMIC_MODEL_PREFIX):
         provider_model = model[len(OLLAMA_DYNAMIC_MODEL_PREFIX):].strip()
         if not provider_model:
@@ -495,6 +504,9 @@ def _estimate_text_tokens(value: Any) -> int:
     if isinstance(value, list):
         return sum(_estimate_text_tokens(item) for item in value)
     if isinstance(value, dict):
+        if value.get("type") in {"image_url", "input_image", "image"}:
+            # Conservative admission forecast; upstream usage replaces it on completion.
+            return 4000
         total = 0
         for key in ("text", "content"):
             item = value.get(key)
@@ -516,6 +528,30 @@ def _chat_max_tokens(payload: OpenAIChatRequest) -> int | None:
     if payload.max_completion_tokens is not None:
         return payload.max_completion_tokens
     return payload.max_tokens
+
+
+# openai-models-list discovery default that clients (OMP) apply to rows with no
+# advertised output cap. JetBrains models whose installed Junie build declares a
+# null maxOutputTokens would otherwise be capped at this value on the wire.
+DISCOVERY_DEFAULT_MAX_OUTPUT_TOKENS = 32768
+
+
+def _effective_max_tokens(requested: int | None, provider: str, resolved_config: dict[str, Any] | None) -> int | None:
+    """Drop the client discovery default when Junie declares no output cap.
+
+    Only the exact discovery default is treated as "unset": an explicitly chosen
+    value, even one equal to the default by chance, is indistinguishable on the
+    wire, so this trades that rare ambiguity for not silently truncating
+    generation on models whose real cap the gateway alone knows.
+    """
+    if (
+        requested == DISCOVERY_DEFAULT_MAX_OUTPUT_TOKENS
+        and provider == "jetbrains"
+        and isinstance(resolved_config, dict)
+        and resolved_config.get("max_tokens_unspecified") is True
+    ):
+        return None
+    return requested
 
 
 def _chat_forecast_usage(payload: OpenAIChatRequest) -> NormalizedUsage:
@@ -941,6 +977,7 @@ def _authorize_cost_admin(request: Request, authorization: str | None) -> JSONRe
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.junie_discovery = discovery_from_env()
     app.state.vertex_client = VertexEmbeddingClient()
     app.state.vertex_chat_client = VertexChatClient()
     app.state.vertex_rerank_client = VertexRerankClient()
@@ -963,7 +1000,7 @@ async def lifespan(app: FastAPI):
         await app.state.jetbrains_chat_client.close()
 
 
-app = FastAPI(title="openai-compatible-bridge", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="AI Model Interop", version="0.1.0", lifespan=lifespan)
 app.router.redirect_slashes = False
 app.add_middleware(
     CORSMiddleware,
@@ -1094,6 +1131,44 @@ def _model_object(model_id: str) -> dict[str, Any]:
     obj["runtime"] = runtime
     return obj
 
+def _jetbrains_image_models() -> set[str]:
+    patterns = [p.strip() for p in os.getenv("JETBRAINS_AI_IMAGE_MODELS", "").split(",") if p.strip()]
+    return {p if p.startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else JETBRAINS_DYNAMIC_MODEL_PREFIX + p
+            for p in patterns}
+
+
+def _discovered_jetbrains_model_object(model_id: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    obj: dict[str, Any] = {"id": model_id, "object": "model", "created": 0, "owned_by": "jetbrains"}
+    for key in ("context_length", "max_tokens"):
+        value = cfg.get(key)
+        if type(value) is int and value > 0:
+            obj[key] = value
+    display_name = cfg.get("display_name")
+    if isinstance(display_name, str) and display_name.strip():
+        # OMP's openai-models-list discovery reads the display label from
+        # `metadata.display_name`; this keeps JetBrains' "Claude Sonnet 5.5"
+        # spelling instead of the hyphenated native id.
+        obj["metadata"] = {"display_name": display_name.strip()}
+    image_support = cfg.get("image") is True or model_id in _jetbrains_image_models()
+    if image_support:
+        obj["input"] = ["text", "image"]
+        obj["capabilities"] = {"images": True, "streaming": True}
+    protocol = cfg.get("protocol")
+    supported = {
+        "openai_responses": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
+        "xai_responses": {"low", "medium", "high", "xhigh"},
+        "anthropic_messages": {"low", "medium", "high", "xhigh", "max"},
+        "google_generate_content": {"low", "medium", "high"},
+    }.get(protocol)
+    if supported is None:
+        return obj
+    efforts = cfg.get("reasoning_efforts")
+    if isinstance(efforts, list):
+        levels = [level for level in efforts if isinstance(level, str) and level in supported]
+        if levels:
+            obj["supported_reasoning_levels"] = [{"effort": level} for level in levels]
+    return obj
+
 
 def _model_in_list(model_id: str) -> bool:
     patterns = [p.strip() for p in _vertex_mod.MODEL_LIST_INCLUDE.split(",") if p.strip()]
@@ -1134,7 +1209,7 @@ def _validate_outgoing_messages(messages: list[dict[str, Any]], provider: str, c
 
 
 @app.get("/v1/models", response_model=None)
-async def list_models(authorization: str | None = Header(default=None)) -> JSONResponse | dict[str, Any]:
+async def list_models(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse | dict[str, Any]:
     if BRIDGE_API_KEY and authorization != f"Bearer {BRIDGE_API_KEY}":
         return openai_error_response(
             message="Invalid wrapper API key.",
@@ -1142,18 +1217,23 @@ async def list_models(authorization: str | None = Header(default=None)) -> JSONR
             error_type="authentication_error",
             code="invalid_api_key",
         )
+    discovery = request.app.state.junie_discovery
+    discovered = await discovery.refresh()
+    registered = current_allowed_models()
     return JSONResponse(
         content={
             "object": "list",
-            "data": [_model_object(m) for m in sorted(current_allowed_models()) if _model_in_list(m)],
+            "data": [(_model_object(m) if m in registered else _discovered_jetbrains_model_object(m, discovered[m]))
+                     for m in sorted(registered | discovered.keys()) if _model_in_list(m)],
         },
-        headers={"Cache-Control": "no-store"},
+        headers={"Cache-Control": "no-store", "X-Junie-Discovery-Status":
+                 "disabled" if not discovery.enabled else "stale" if discovery.stale else "fresh"},
     )
 
 
-@app.get("/v1/models/{model_id}", response_model=None)
+@app.get("/v1/models/{model_id:path}", response_model=None)
 async def retrieve_model(
-    model_id: str, authorization: str | None = Header(default=None)
+    model_id: str, request: Request, authorization: str | None = Header(default=None)
 ) -> JSONResponse | dict[str, Any]:
     if BRIDGE_API_KEY and authorization != f"Bearer {BRIDGE_API_KEY}":
         return openai_error_response(
@@ -1162,6 +1242,9 @@ async def retrieve_model(
             error_type="authentication_error",
             code="invalid_api_key",
         )
+    discovered = await request.app.state.junie_discovery.refresh() if model_id.startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else {}
+    if model_id not in current_allowed_models() and model_id in discovered:
+        return _discovered_jetbrains_model_object(model_id, discovered[model_id])
     if model_id not in current_allowed_models():
         return openai_error_response(
             message=f"The model '{model_id}' does not exist.",
@@ -1361,7 +1444,7 @@ def _chat_completions_stream(
                 stream_kwargs = {
                     "model": provider_model or payload.model,
                     "messages": messages,
-                    "max_tokens": _chat_max_tokens(payload),
+                    "max_tokens": _effective_max_tokens(_chat_max_tokens(payload), provider, resolved_config),
                     "temperature": payload.temperature,
                     "top_p": payload.top_p,
                     "stop": payload.stop,
@@ -1377,16 +1460,10 @@ def _chat_completions_stream(
                     stream_kwargs["reasoning_effort"] = payload.reasoning_effort
                     stream_kwargs["reasoning"] = payload.reasoning
                 elif resolved_config is not None:
-                    if provider == "foundry":
+                    if provider in {"foundry", "jetbrains"}:
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
                     elif provider in {"openai_compat", "openai_compatible"} and payload.reasoning_effort is not None:
                         stream_kwargs["reasoning_effort"] = payload.reasoning_effort
-                    elif provider == "jetbrains":
-                        eff = payload.reasoning_effort
-                        if eff is None and isinstance(payload.reasoning, dict):
-                            eff = payload.reasoning.get("effort")
-                        if eff is not None:
-                            stream_kwargs["reasoning_effort"] = eff
                     stream_kwargs["resolved_config"] = resolved_config
                 async def events():
                     async for event in chat_client.stream_chat(**stream_kwargs):
@@ -1413,6 +1490,9 @@ def _chat_completions_stream(
                         delta["content"] = delta_text
                     if delta_tool_calls:
                         delta["tool_calls"] = delta_tool_calls
+                    thinking_blocks = event.get("thinking_blocks")
+                    if thinking_blocks:
+                        delta["thinking_blocks"] = thinking_blocks
 
                     if delta:
                         yield _chunk(delta, None)
@@ -1570,7 +1650,8 @@ async def create_chat_completions(
             code="invalid_api_key",
         )
 
-    _chat_cfg, model_error = _resolve_chat_model(payload.model)
+    discovered = await request.app.state.junie_discovery.refresh() if payload.model.startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else {}
+    _chat_cfg, model_error = _resolve_chat_model(payload.model, discovered)
     if model_error is not None:
         return model_error
 
@@ -1593,6 +1674,20 @@ async def create_chat_completions(
         _validate_outgoing_messages([_normalize_chat_message(m) for m in payload.messages], provider, _chat_cfg, payload.model)
     except VertexAPIError as exc:
         return openai_error_response(message=exc.message, status_code=400, error_type="invalid_request_error", code=exc.code, param=exc.stage)
+
+    if provider == "jetbrains" and payload.reasoning is not None:
+        effort = payload.reasoning.get("effort")
+        if set(payload.reasoning) != {"effort"} or not isinstance(effort, str):
+            return openai_error_response(
+                message="JetBrains reasoning supports only a string effort.", status_code=400,
+                error_type="invalid_request_error", code="unsupported_parameter", param="reasoning",
+            )
+        if payload.reasoning_effort is not None and payload.reasoning_effort != effort:
+            return openai_error_response(
+                message="Conflicting reasoning effort values.", status_code=400,
+                error_type="invalid_request_error", code="invalid_request", param="reasoning",
+            )
+        payload.reasoning_effort = effort
     effective_reasoning_effort: Any = payload.reasoning_effort
     if effective_reasoning_effort is None and payload.reasoning is not None:
         if isinstance(payload.reasoning, dict) and "effort" in payload.reasoning:
@@ -1681,7 +1776,7 @@ async def create_chat_completions(
             generate_kwargs = {
                 "model": provider_model,
                 "messages": messages,
-                "max_tokens": _chat_max_tokens(payload),
+                "max_tokens": _effective_max_tokens(_chat_max_tokens(payload), provider, _chat_cfg),
                 "temperature": payload.temperature,
                 "top_p": payload.top_p,
                 "stop": payload.stop,
@@ -1693,12 +1788,10 @@ async def create_chat_completions(
                 generate_kwargs["tool_choice"] = payload.tool_choice
             if payload.parallel_tool_calls is not None:
                 generate_kwargs["parallel_tool_calls"] = payload.parallel_tool_calls
-            if provider == "foundry":
+            if provider in {"foundry", "jetbrains"}:
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
             elif provider in {"openai_compat", "openai_compatible"} and payload.reasoning_effort is not None:
                 generate_kwargs["reasoning_effort"] = payload.reasoning_effort
-            elif provider == "jetbrains" and effective_reasoning_effort is not None:
-                generate_kwargs["reasoning_effort"] = effective_reasoning_effort
             if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"}:
                 generate_kwargs["resolved_config"] = _chat_cfg
                 result = await chat_client.generate(**generate_kwargs)
@@ -1726,6 +1819,8 @@ async def create_chat_completions(
                 choice_message["content"] = ""
             if "tool_calls" in result and result["tool_calls"]:
                 choice_message["tool_calls"] = result["tool_calls"]
+            if result.get("thinking_blocks"):
+                choice_message["thinking_blocks"] = result["thinking_blocks"]
 
             return {
                 "id": _new_chat_completion_id(),
@@ -1771,7 +1866,7 @@ def _anthropic_generate_kwargs(
     generate_kwargs: dict[str, Any] = {
         "model": provider_model,
         "messages": params["messages"],
-        "max_tokens": params["max_tokens"],
+        "max_tokens": _effective_max_tokens(params["max_tokens"], provider, resolved_config),
         "temperature": params["temperature"],
         "top_p": params["top_p"],
         "stop": params["stop"],
@@ -1940,6 +2035,14 @@ async def create_anthropic_messages(
         cfg["kind"] = "chat"
         cfg["provider_model"] = native
         provider_model = native
+    elif params["model"] not in _vertex_allowed_models() and params["model"] in (discovered := await request.app.state.junie_discovery.refresh() if params["model"].startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX) else {}):
+        cfg = discovered[params["model"]]
+        if cfg.get("protocol") is None:
+            return anthropic_error_response(
+                message="The discovered JetBrains model has an unsupported protocol; configure an explicit registry entry.",
+                status_code=400, error_type="invalid_request_error",
+            )
+        provider_model = cfg["provider_model"]
     elif params["model"] not in current_allowed_models() and params["model"].startswith(JETBRAINS_DYNAMIC_MODEL_PREFIX):
         native = params["model"][len(JETBRAINS_DYNAMIC_MODEL_PREFIX):].strip()
         if not native:
@@ -2479,6 +2582,7 @@ def _lifespan_with_factories(
 ) -> Any:
     @asynccontextmanager
     async def managed_lifespan(app: FastAPI):
+        app.state.junie_discovery = discovery_from_env()
         app.state.vertex_client = embedding_client_factory()
         app.state.vertex_chat_client = chat_client_factory()
         app.state.vertex_rerank_client = rerank_client_factory()
@@ -2540,7 +2644,7 @@ def create_app(
     jetbrains_factory = jetbrains_chat_client_factory
     cost_factory = cost_accounting_factory or (lambda: build_async_cost_accounting(os.environ))
     bridge_app = FastAPI(
-        title="openai-compatible-bridge",
+        title="AI Model Interop",
         version="0.1.0",
         lifespan=_lifespan_with_factories(
             embedding_client_factory=embedding_factory,

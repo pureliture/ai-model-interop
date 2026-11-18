@@ -1,7 +1,7 @@
 <a id="top"></a>
 
 <div align="center">
-  <img src="./assets/header.svg" width="100%" alt="openai-compatible-bridge — OpenAI-compatible API surface, provider-native routing, private / local-only"/>
+  <img src="./assets/header.svg" width="100%" alt="AI Model Interop — multi-protocol AI model API gateway, provider-native routing, private / local-only"/>
 </div>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 <div align="center">
-  <h3>OpenAI-compatible API shape을 유지하면서 Vertex AI, Ollama, Palantir Foundry 같은 provider-native model API를 연결하는 <b>로컬/사내망 전용 private bridge</b>입니다.</h3>
+  <h3><b>AI Model Interop</b>은 OpenAI-compatible API와 Anthropic Messages 요청을 Vertex AI, Ollama, Palantir Foundry, JetBrains AI 등의 provider-native AI model API로 변환·라우팅하는 <b>로컬/사내망 전용 multi-protocol gateway</b>입니다.</h3>
 </div>
 
 > [!WARNING]
@@ -45,7 +45,7 @@ OpenAI-compatible client가 여러 provider를 직접 다루게 만들면 인증
 ## 🏛️ 시스템 아키텍처
 
 <div align="center">
-  <img src="./assets/architecture.svg" width="100%" alt="OpenAI-compatible bridge architecture"/>
+  <img src="./assets/architecture.svg" width="100%" alt="AI Model Interop architecture"/>
 </div>
 
 ### 🎨 핵심 설계 포인트
@@ -111,7 +111,7 @@ Palantir Foundry의 이기종 upstream LLM Proxy를 단일 OpenAI 규격(`/v1/ch
 sequenceDiagram
     autonumber
     actor Client as OpenAI-compatible Client
-    participant Bridge as openai-compatible-bridge
+    participant Bridge as AI Model Interop
     participant Foundry as Palantir Foundry LLM Proxy
 
     Client->>Bridge: POST /v1/chat/completions (tools, tool_choice)
@@ -262,11 +262,57 @@ JetBrains AI는 Grazie Gateway를 통해 OpenAI, Anthropic (Claude), xAI (Grok),
 }
 ```
 
-* 인증: JetBrains OAuth (PKCE) → JWT 토큰. `JETBRAINS_AI_TOKEN` 환경변수로 주입. bridge는 토큰 갱신을 하지 않는다.
+* 인증: `JETBRAINS_AI_TOKEN`으로 정적 토큰을 주입하거나 별도 OAuth grant를 발급해 `JETBRAINS_AI_OAUTH_FILE`로 갱신 저장소를 지정한다. 별도 grant의 발급·갱신과 기존 Junie 로그인 유지가 한 환경에서 확인됐으나 모든 계정에 보장되지 않으며, [로그인 및 보안 제약](specs/jetbrains-grazie-provider/oauth-refresh.md)을 확인해야 한다.
 * Base URL: `JETBRAINS_AI_BASE_URL` (기본값: `https://ingrazzio-cloud-prod.labs.jb.gg`)
 * 동적 모델: `jetbrains:<native-model>` prefix로 registry 없이 직접 호출 가능 (예: `jetbrains:gpt-5.4`)
 * 과금: `COST_PROVIDER_BILLING_JSON`에 `"jetbrains"` 키를 실제 계약(`subscription` 등)으로 분류한다.
-* reasoning override: JetBrains의 네 가지 프로토콜은 아직 검증된 변환 계약이 없으므로 OpenAI의 `reasoning_effort`/`reasoning` 및 Anthropic의 `output_config.effort` 요청을 스트리밍 시작과 upstream 호출 전에 HTTP 400으로 거부한다. 미지정 요청은 그대로 처리한다.
+* reasoning override: OpenAI·Grok Responses는 `reasoning.effort`, Anthropic Messages는 `output_config.effort`와 adaptive thinking, Google generateContent는 `thinkingConfig.thinkingLevel`로 전달한다. Anthropic·Google도 Junie CLI가 반환한 모델별 ACP `effort` 선택지를 그대로 discovery `/v1/models`의 `supported_reasoning_levels`로 광고한다. Anthropic thinking 서명과 Google `thoughtSignature`는 tool-call 대화에 왕복 보존한다. Claude는 `xhigh/max`, Google은 CLI가 제공하는 `low/medium/high`까지 실제 호출로 확인했다. Grok의 `none`과 `reasoning`의 다른 속성은 검증되지 않아 거부한다.
+* 이미지 입력: OpenAI/xAI Responses(`input_image`), Anthropic Messages(`image` base64), Google generateContent(`inlineData`)로 전달한다. base64 `data:` 이미지만 허용하고 원격 URL은 SSRF 방지를 위해 거부한다. PNG/JPEG/WebP/GIF, 이미지당 10MiB, 요청당 최대 8개·20MiB로 제한한다. Anthropic ingress도 base64 이미지 블록을 지원한다. Junie JAR의 모델별 `ModelCapabilities.getVision()`을 읽어 `JUNIE_DISCOVERY_JAR`가 설정된 경우 이미지 지원을 자동으로 광고하므로, Junie 업데이트로 새 모델이 추가되면 별도 등록 없이 반영된다. JAR를 읽지 못하거나 JAR에 없는 모델은 `JETBRAINS_AI_IMAGE_MODELS`(쉼표 구분, `jetbrains:` prefix 선택)로 수동 지정할 수 있고, 미지정 모델은 텍스트 전용으로 광고된다.
+
+#### Junie ACP 모델 탐색과 OMP 연결
+
+브리지를 Junie가 설치되고 로그인된 사용자 환경에서 실행하고 `JUNIE_DISCOVERY_ENABLED=true`를 설정한다. 선택적으로 `JUNIE_DISCOVERY_COMMAND`에 실행 파일 경로, `JUNIE_DISCOVERY_CWD`에 Junie 세션 작업 디렉터리를 지정한다. 브리지는 모델 목록이나 JetBrains 모델 요청 시 `junie --acp=true --skip-update-check`로 `initialize`, `session/new`와 모델별 `session/set_config_option`을 수행해 추론 수준 선택지를 확인하지만 추론 요청은 보내지 않는다. 시간 제한으로 확인하지 못한 모델의 추론 수준은 노출하지 않는다. ACP 탐색은 최대 10초, 선택적인 JAR 조회는 추가로 최대 5초이며 성공 결과는 5분 동안 캐시한다. ACP 탐색이 실패하면 마지막 성공 목록을 유지하고 30초 후 재시도한다. `/v1/models`의 `X-Junie-Discovery-Status`는 `disabled`, `fresh`, `stale` 중 하나다. 첫 탐색이 실패했다면 stale 목록은 비어 있다.
+
+ACP의 `model` 옵션에서 `jetbrains-ai` 그룹의 `v1:12:jetbrains-ai:<native>` 항목 중 안전한 ID를 모두 `jetbrains:<native>`로 노출한다. `claude-`, `gemini-`, `grok-`, `gpt-` 및 `openai-gpt-` 계열은 각 프로토콜로 연결하며 upstream에도 변환 없이 원래 native ID를 전달한다. 그 밖의 발견 모델은 목록에서 확인할 수 있지만, 프로토콜을 추측하지 않고 채팅 요청을 `unsupported_model` 오류로 거부한다. 명시적 registry로 정확한 `provider_model`과 `protocol`을 지정하면 탐색 결과보다 우선한다. ACP 목록은 실제 Grazie 모델 ID 호환성이나 호출 성공을 보증하지 않으며 upstream 오류는 기존 오류 처리 경로로 전달된다.
+
+선택적으로 `JUNIE_DISCOVERY_JAR`에 **ACP 실행과 동일한 Junie 버전**의 JAR 경로 또는 단일 파일에 일치하는 glob을 지정하면 JAR의 모델별 `maxContextTokens`와 `maxOutputTokens`를 읽어, ACP에서 발견된 동일 ID에만 각각 `context_length`와 `max_tokens`로 노출한다. Java 소스 실행을 지원하는 JDK가 필요하며 `JUNIE_DISCOVERY_JAVA`로 Java 실행 파일을 지정할 수 있다. JAR 탐색·실행 실패 또는 값이 없는 경우 해당 한도는 생략되며 클라이언트 기본값이 적용될 수 있다. Junie 내부 클래스 형식은 버전에 따라 변경될 수 있고, Junie 설정값은 Grazie 서버의 실제 한도를 보증하지 않는다.
+
+`/v1/models` 행은 ACP가 제공하는 표시 이름(`Claude Sonnet 5.5` 등)을 `metadata.display_name`으로 함께 노출한다. OMP `openai-models-list` discovery는 이 값을 모델 이름으로 사용하므로, 하이픈으로 정규화된 native ID(`claude-sonnet-5-5`) 대신 원래 표기를 표시한다.
+
+JAR가 해당 모델의 `maxOutputTokens`를 **null**로 선언한 경우, 브리지는 그 사실을 요청 처리에 반영한다. `openai-models-list` 클라이언트(OMP)는 출력 한도를 광고하지 않는 행에 discovery 기본값 32768을 적용해 `max_tokens`를 전송하는데, 이 값이 그대로 upstream에 전달되면 Gateway가 허용하는 실제 한도보다 낮게 생성을 자를 수 있다. 그래서 `max_tokens`/`max_completion_tokens`가 정확히 32768이고 JAR가 null을 선언한 모델이면 브리지는 출력 한도 필드를 생략하고 한도 판단을 Gateway에 맡긴다. JAR 조회 실패·모델 미일치는 null과 구분하므로 이 동작을 적용하지 않는다. 클라이언트가 32768을 명시적으로 선택한 경우도 같은 값이므로 구분할 수 없다.
+
+탐색되지 않은 `jetbrains:<native>` 직접 호출은 기존 동작대로 기본 OpenAI 프로토콜을 사용한다. 이 동작은 임의 ID에 대한 호환성 보장이 아니며, 다른 프로토콜이 필요하면 registry에 명시해야 한다.
+
+모델 발견 기능은 Junie 프로세스를 통해 목록만 조회하며 자격 증명을 직접 읽지 않는다. 기존 Grazie 채팅 경로에는 별도의 인증이 필요하다. 인증·모델 사용 권한과 upstream ID는 실제 호출로 별도 확인해야 한다.
+로컬 실행 예시:
+
+```sh
+mkdir -m 700 -p "$HOME/.local/share/ai-model-interop"
+uv run python -m openai_compatible_bridge.jetbrains_login --output "$HOME/.local/share/ai-model-interop/jetbrains-oauth.json"
+export JETBRAINS_AI_OAUTH_FILE="$HOME/.local/share/ai-model-interop/jetbrains-oauth.json"
+export JUNIE_DISCOVERY_ENABLED=true
+export MODEL_LIST_INCLUDE='jetbrains:*'
+uv run uvicorn openai_compatible_bridge.main:app --host 127.0.0.1 --port 8000
+```
+
+브라우저에서 별도 인증 grant를 승인해야 한다. 기존 Junie refresh token을 복사·공유하지 않는다. Compose 사용 시 Junie 실행 파일과 로그인 환경, OAuth 파일이 있는 전용 writable 디렉터리를 별도로 제공해야 한다. `MODEL_LIST_INCLUDE`는 목록에 노출할 모델을 필터링하며, 생략하면 다른 provider 모델도 OMP 목록에 나타날 수 있다.
+
+
+예를 들어 인증을 사용하지 않는 로컬 bridge라면 OMP의 `~/.omp/agent/models.yml`에 다음을 추가한다. `baseUrl`의 `/v1`은 OMP discovery에서 다시 붙이지 않도록 `injectV1: false`를 설정한다.
+
+```yaml
+providers:
+  jetbrains-bridge:
+    baseUrl: http://127.0.0.1:8000/v1
+    api: openai-completions
+    auth: none
+    discovery:
+      type: openai-models-list
+      injectV1: false
+      timeoutMs: 15000
+```
+
+`BRIDGE_API_KEY`를 활성화한 경우에는 OMP provider에 해당 bridge 인증을 별도로 설정한다. 처음에는 `omp models jetbrains-bridge`로 탐색·캐시한 다음 `omp --model 'jetbrains-bridge/jetbrains:gpt-6-luna'`처럼 선택한다. 이후 모델이 변경되면 OMP의 목록을 새로고침한다.
 
 ### Model Alias
 
@@ -311,14 +357,16 @@ Client 요청에는 provider field를 넣지 않습니다. `model` 값이 regist
 | `EMBEDDINGS_RETRY_MAX_ATTEMPTS` | `4` | Vertex embedding 429/503의 총 전송 시도 상한. 최초 전송 포함 `1..8`의 정수. `1`은 자동 재시도 비활성화. |
 | `EMBEDDINGS_RETRY_INITIAL_DELAY_SECONDS` | `1` | 최초 backoff의 기준 시간. 유한한 `0.01..30`초. 다음 기준 시간은 2배씩 증가하며 jitter ±20% 적용. |
 | `EMBEDDINGS_RETRY_MAX_DELAY_SECONDS` | `8` | 계산한 backoff의 상한. 유한한 `0.01..60`초이며 최초 기준 시간 이상. 더 긴 upstream `Retry-After`는 재시도 전체 시간 안에서 존중. |
-| `EMBEDDINGS_RETRY_TIMEOUT_SECONDS` | `30` | 최초 429/503 응답 이후 모든 재시도의 대기·HTTP 슬롯 획득·비용 admission·HTTP 전송을 합친 제한 시간. 유한한 `0.1..300`초. 최초 전송의 기존 HTTP timeout은 유지. |
+| `EMBEDDINGS_RETRY_TIMEOUT_SECONDS` | `30` | 최초 429/503 응답 이후 모든 재시도의 대기·HTTP 슬롯 획득·비용 admission·HTTP 전송을 합친 제한 시간. 유한한 `0.1..300`초. 최초 전송에는 선택적 HTTP timeout만 적용. |
 | `MODEL_REGISTRY_JSON` | `""` | Model alias registry override JSON. |
 | `EXTRA_MODELS` | `""` | Backward-compatible comma-separated Vertex predict model additions. |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama native API base URL. Docker에서는 `http://host.docker.internal:11434` 권장. |
 | `FOUNDRY_BASE_URL` | `""` | 고정된 Foundry OpenAI-compatible `/chat/completions` endpoint. `google_generate_content`는 이 URL의 host/root에서 Google native model endpoint를 안전하게 파생합니다. |
 | `FOUNDRY_TOKEN` | `""` | Foundry bearer token. 운영에서는 Kubernetes Secret 또는 로컬 `.env`에만 저장. |
-| `FOUNDRY_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | Foundry 전용 HTTP timeout. |
-| `OLLAMA_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | Ollama native API 전용 HTTP timeout. reasoning-heavy model은 더 길게 잡을 수 있음. |
+| `FOUNDRY_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | 선택적 Foundry HTTP timeout(초). |
+| `JETBRAINS_AI_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | 선택적 JetBrains HTTP timeout(초); OAuth 토큰 갱신 제한과 별개. |
+| `OLLAMA_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | 선택적 Ollama HTTP timeout(초). |
+| `OPENAI_COMPAT_HTTP_TIMEOUT_SECONDS` | `HTTP_TIMEOUT_SECONDS` | 선택적 OpenAI 호환 upstream HTTP timeout(초). |
 | `OLLAMA_THINK` | `true` | Ollama `think` request field 기본값. `true`, `false`, `low`, `medium`, `high`, `omit` 지원. 요청별 `reasoning_effort`/`reasoning.effort`가 있으면 해당 요청에서 override. |
 | `STRUCTURED_OUTPUT_REPAIR_ENABLED` | `false` | Dynamic Ollama Cloud `json_schema` 실패에 한해 bounded repair chain 활성화. |
 | `STRUCTURED_OUTPUT_REPAIR_MODELS` | `ollama:qwen3.5:cloud,ollama:gemma4:31b-cloud,ollama:glm-5.2:cloud` | Repair 후보 모델 순서. 최대 3개만 사용하며 `metered` 후보의 각 HTTP 시도도 cost/budget gate를 통과해야 함. |
@@ -329,7 +377,7 @@ Client 요청에는 provider field를 넣지 않습니다. `model` 값이 regist
 | `VERTEX_AUTO_TRUNCATE` | `true` | Vertex embedding auto truncate flag. |
 | `TOKEN_REFRESH_SKEW_SECONDS` | `300` | Vertex access token을 만료 몇 초 전에 선갱신할지. |
 | `MAX_CONCURRENCY` | `8` | Vertex chat/rerank의 HTTP 동시 호출 상한. Vertex embedding은 `EMBEDDINGS_MAX_INFLIGHT`를 사용. |
-| `HTTP_TIMEOUT_SECONDS` | `60` | Provider HTTP timeout. |
+| `HTTP_TIMEOUT_SECONDS` | `""` (무제한) | Provider HTTP timeout(초). 미설정/빈 값이면 제한 없음. 숫자 지정 시 read timeout은 데이터 간 대기 시간에 적용. Provider별 값이 우선한다. |
 | `DEFAULT_MAX_INSTANCES` | `1` | 알 수 없는 Vertex predict model 호출 시 요청당 instance chunk 폴백. |
 | `COST_TRACKING_ENABLED` | `false` | 비용 추적과 forecast budget gate 활성화 여부. `false`는 명시적 보호 해제. |
 | `COST_PROVIDER_BILLING_JSON` | `""` | `vertex`/`ollama`/`foundry`의 실제 계약을 `metered`/`subscription`/`nonbillable`로 명시. 추정 기본값 없이 빈 값·누락·잘못된 분류는 fail-closed. |
@@ -617,7 +665,7 @@ docker compose up -d --build
 ---
 
 <p align="center">
-  <sub><b>openai-compatible-bridge</b> · private / local-only</sub><br/><br/>
+  <sub><b>AI Model Interop</b> · private / local-only</sub><br/><br/>
   <a href="#arch">🏛️ 아키텍처</a> &nbsp;·&nbsp;
   <a href="#quickstart">🚀 빠른 시작</a> &nbsp;·&nbsp;
   <a href="#top">⬆️ 맨 위로</a>

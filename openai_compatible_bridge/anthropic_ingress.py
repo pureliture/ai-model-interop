@@ -117,7 +117,8 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
 
     - assistant tool_use -> tool_calls
     - user tool_result -> role=tool 메시지 (is_error는 extra로 보존)
-    - thinking/redacted_thinking -> 스킵, image 등 미디어 -> 400
+    - thinking/redacted_thinking -> 스킵
+    - user image(base64) -> OpenAI image_url data URL, 그 외 미디어 -> 400
     """
     if not isinstance(messages, list) or not messages:
         raise AnthropicBadRequest("messages must be a non-empty array.")
@@ -163,8 +164,9 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
                 extra = block.keys() - {"type", "text"}
                 if extra:
                     raise AnthropicBadRequest(f"messages[{index}].content[{block_index}].{sorted(extra)[0]} cannot be represented in chat protocol.")
-                text_parts.append(str(block.get("text", "")))
-                user_blocks.append({"type": "text", "text": str(block.get("text", ""))})
+                text = str(block.get("text", ""))
+                text_parts.append(text)
+                user_blocks.append({"type": "text", "text": text})
             elif block_type == "image":
                 path = f"messages[{index}].content[{block_index}]"
                 if role != "user":
@@ -179,7 +181,7 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
                 if extra:
                     raise AnthropicBadRequest(f"{path}.source.{sorted(extra)[0]} cannot be represented in chat protocol.")
                 media_type, data = source.get("media_type"), source.get("data")
-                if not isinstance(media_type, str) or not isinstance(data, str):
+                if not isinstance(media_type, str) or not isinstance(data, str) or not data:
                     raise AnthropicBadRequest(f"{path}.source requires media_type and data for chat protocol.")
                 user_blocks.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}})
                 has_images = True
