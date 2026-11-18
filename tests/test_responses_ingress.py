@@ -85,10 +85,11 @@ def test_parse_responses_instructions_developer_and_history_items() -> None:
     messages = params["messages"]
     assert messages[0] == {
         "role": "system",
-        "content": "Base system prompt\n\nAGENTS.md rules",
+        "content": "Base system prompt",
     }
-    assert messages[1] == {"role": "user", "content": "Refactor UserService"}
-    assert messages[2] == {
+    assert messages[1] == {"role": "developer", "content": "AGENTS.md rules"}
+    assert messages[2] == {"role": "user", "content": "Refactor UserService"}
+    assert messages[3] == {
         "role": "assistant",
         "content": None,
         "tool_calls": [
@@ -99,13 +100,12 @@ def test_parse_responses_instructions_developer_and_history_items() -> None:
             }
         ],
     }
-    assert messages[3] == {
+    assert messages[4] == {
         "role": "tool",
         "tool_call_id": "call_shell_1",
         "content": "UserService.py\n",
     }
-    # Mid-conversation developer message preserved in turn order as user message
-    assert messages[4] == {"role": "user", "content": "Mid-turn environment update"}
+    assert messages[5] == {"role": "developer", "content": "Mid-turn environment update"}
 
 
 def test_parse_responses_flat_and_custom_tools_and_reverse_mapping() -> None:

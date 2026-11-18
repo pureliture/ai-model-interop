@@ -126,6 +126,10 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             raise AnthropicBadRequest(f"messages[{index}] must be an object.")
+        extra = set(message) - {"role", "content"}
+        if extra:
+            field = sorted(extra)[0]
+            raise AnthropicBadRequest(f"messages[{index}].{field} cannot be represented in the chat protocol.")
         role = message.get("role")
         if role not in ("user", "assistant", "system"):
             raise AnthropicBadRequest(f"messages[{index}].role must be user, assistant, or system.")

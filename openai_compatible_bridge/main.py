@@ -71,6 +71,7 @@ from openai_compatible_bridge.providers.jetbrains import (
     JetBrainsChatClient,
     infer_jetbrains_protocol,
     validate_jetbrains_parameters,
+    validate_jetbrains_messages,
 )
 from openai_compatible_bridge.providers.ollama import OllamaChatClient
 from openai_compatible_bridge.providers.openai_compatible import (
@@ -1582,6 +1583,7 @@ async def create_chat_completions(
             (_chat_cfg or {}).get("provider_model", payload.model)
         )
         try:
+            validate_jetbrains_messages(protocol, [_normalize_chat_message(m) for m in payload.messages])
             validate_jetbrains_parameters(
                 protocol,
                 reasoning_effort=effective_reasoning_effort,
@@ -1589,7 +1591,7 @@ async def create_chat_completions(
                 response_format=payload.response_format,
             )
         except VertexAPIError as exc:
-            param = (
+            param = exc.stage or (
                 ("reasoning_effort" if payload.reasoning_effort is not None else "reasoning")
                 if effective_reasoning_effort is not None
                 else None
@@ -1950,6 +1952,7 @@ async def create_anthropic_messages(
     if provider == "jetbrains":
         protocol = (cfg or {}).get("protocol") or infer_jetbrains_protocol(provider_model)
         try:
+            validate_jetbrains_messages(protocol, params["messages"])
             validate_jetbrains_parameters(
                 protocol,
                 reasoning_effort=params["reasoning_effort"],
@@ -2237,6 +2240,7 @@ async def create_responses(
     if provider == "jetbrains":
         protocol = (_chat_cfg or {}).get("protocol") or infer_jetbrains_protocol(provider_model)
         try:
+            validate_jetbrains_messages(protocol, params["messages"])
             validate_jetbrains_parameters(
                 protocol,
                 reasoning_effort=params["reasoning_effort"],
@@ -2249,6 +2253,7 @@ async def create_responses(
                 status_code=exc.status_code,
                 error_type=map_vertex_status_to_openai_type(exc.status_code),
                 code=exc.code,
+                param=exc.stage,
             )
 
     if params["tools"] is not None and not PROVIDER_TOOL_SUPPORT.get(provider, False):

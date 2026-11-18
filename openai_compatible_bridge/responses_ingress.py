@@ -231,18 +231,22 @@ def responses_input_to_messages(
             if effective_role not in ("user", "assistant", "system", "developer"):
                 raise ResponsesBadRequest(
                     f"Unsupported message role in input[{index}]: {effective_role!r}.",
-                    param="input",
+                    param=f"input[{index}].role",
                 )
-            text = _extract_responses_content_text(item.get("content"))
-            if effective_role in ("system", "developer"):
-                if not saw_conversation_turn:
-                    if text:
-                        system_parts.append(text)
-                else:
-                    messages.append({"role": "user", "content": text})
+            extra = set(item) - {"type", "role", "content"}
+            if extra:
+                field = sorted(extra)[0]
+                raise ResponsesBadRequest(
+                    f"input[{index}].{field} cannot be represented in the chat protocol.",
+                    param=f"input[{index}].{field}",
+                )
+            content = item.get("content")
+            if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "input_image" for b in content):
+                content = [({"type": "image_url", "image_url": {"url": b.get("image_url"), **({"detail": b["detail"]} if "detail" in b else {})}, **({"file_id": b["file_id"]} if "file_id" in b else {})} if isinstance(b, dict) and b.get("type") == "input_image" else {"type": "text", "text": b.get("text", "")} if isinstance(b, dict) and b.get("type") == "input_text" else b) for b in content]
             else:
-                saw_conversation_turn = True
-                messages.append({"role": effective_role, "content": text})
+                content = _extract_responses_content_text(content)
+            saw_conversation_turn = True
+            messages.append({"role": effective_role, "content": content})
             continue
 
         raise ResponsesBadRequest(
