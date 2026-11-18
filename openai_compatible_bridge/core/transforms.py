@@ -18,6 +18,7 @@ from openai_compatible_bridge.core.conversation_state import (
     get_default_conversation_state_cache,
 )
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
+from openai_compatible_bridge.core.images import data_url, normalize_content
 from openai_compatible_bridge.providers.vertex import (
     VertexAPIError,
     _extract_message_text,
@@ -273,8 +274,14 @@ def _xai_input_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             text = _extract_message_text(content) if content is not None else ""
             input_items.append({"role": "system", "content": text})
         else:
-            text = _extract_message_text(content) if content is not None else ""
-            input_items.append({"role": role, "content": text})
+            blocks = normalize_content(content)
+            if any(block["type"] == "image" for block in blocks):
+                if role != "user":
+                    raise VertexAPIError(400, "Images require user role for Responses.", code="invalid_request_error", stage="messages")
+                parts = [{"type": "input_text", "text": b["text"]} if b["type"] == "text" else {"type": "input_image", "image_url": data_url(b)} for b in blocks]
+                input_items.append({"role": role, "content": parts})
+            else:
+                input_items.append({"role": role, "content": "".join(b["text"] for b in blocks)})
     return input_items
 
 
@@ -380,8 +387,11 @@ def _google_contents_and_system(
                 contents.append({"role": "user", "parts": [part]})
             continue
 
-        text = _extract_message_text(content) if content is not None else ""
-        contents.append({"role": "user", "parts": [{"text": text}]})
+        if role != "user":
+            raise VertexAPIError(400, f"Unsupported role {role!r} for Google GenerateContent.", code="invalid_request_error", stage="messages")
+        blocks = normalize_content(content)
+        parts = [{"text": b["text"]} if b["type"] == "text" else {"inlineData": {"mimeType": b["mime_type"], "data": b["data"]}} for b in blocks]
+        contents.append({"role": "user", "parts": parts or [{"text": ""}]})
 
     if not contents:
         contents.append({"role": "user", "parts": [{"text": ""}]})

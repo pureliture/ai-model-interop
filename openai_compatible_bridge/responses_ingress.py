@@ -231,18 +231,47 @@ def responses_input_to_messages(
             if effective_role not in ("user", "assistant", "system", "developer"):
                 raise ResponsesBadRequest(
                     f"Unsupported message role in input[{index}]: {effective_role!r}.",
-                    param="input",
+                    param=f"input[{index}].role",
                 )
-            text = _extract_responses_content_text(item.get("content"))
-            if effective_role in ("system", "developer"):
-                if not saw_conversation_turn:
-                    if text:
-                        system_parts.append(text)
-                else:
-                    messages.append({"role": "user", "content": text})
+            extra = set(item) - {"type", "role", "content"}
+            if extra:
+                field = sorted(extra)[0]
+                raise ResponsesBadRequest(
+                    f"input[{index}].{field} cannot be represented in the chat protocol.",
+                    param=f"input[{index}].{field}",
+                )
+            content = item.get("content")
+            if isinstance(content, list):
+                mapped = []
+                has_image = False
+                for block_index, block in enumerate(content):
+                    if isinstance(block, dict) and block.get("type") == "input_image":
+                        path = f"input[{index}].content[{block_index}]"
+                        extra = block.keys() - {"type", "image_url", "detail", "file_id"}
+                        if extra:
+                            field = sorted(extra)[0]
+                            raise ResponsesBadRequest(f"{path}.{field} cannot be represented in chat protocol.", param=f"{path}.{field}")
+                        image = {"type": "image_url", "image_url": {"url": block.get("image_url")}}
+                        if "detail" in block:
+                            image["image_url"]["detail"] = block["detail"]
+                        if "file_id" in block:
+                            image["file_id"] = block["file_id"]
+                        mapped.append(image)
+                        has_image = True
+                    elif isinstance(block, dict) and block.get("type") in {"input_text", "output_text", "text"}:
+                        extra = block.keys() - {"type", "text"}
+                        if extra:
+                            field = sorted(extra)[0]
+                            path = f"input[{index}].content[{block_index}].{field}"
+                            raise ResponsesBadRequest(f"{path} cannot be represented in chat protocol.", param=path)
+                        mapped.append({"type": "text", "text": block.get("text", "")})
+                    else:
+                        mapped.append(block)
+                content = mapped if has_image else _extract_responses_content_text(content)
             else:
-                saw_conversation_turn = True
-                messages.append({"role": effective_role, "content": text})
+                content = _extract_responses_content_text(content)
+            saw_conversation_turn = True
+            messages.append({"role": effective_role, "content": content})
             continue
 
         raise ResponsesBadRequest(

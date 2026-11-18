@@ -141,6 +141,22 @@ def validate_jetbrains_parameters(
         raise VertexAPIError(400, "Invalid json_schema response format.", code="invalid_request_error")
 
 
+# Allowed message roles by target protocol. Tool results require a linkage ID;
+# message metadata is rejected unless the target conversion preserves it.
+JETBRAINS_MESSAGE_ROLES = {
+    JETBRAINS_OPENAI_PROTOCOL: {"system", "developer", "user", "assistant", "tool"},
+    JETBRAINS_XAI_PROTOCOL: {"system", "user", "assistant", "tool"},
+    JETBRAINS_ANTHROPIC_PROTOCOL: {"system", "user", "assistant", "tool"},
+    JETBRAINS_GOOGLE_PROTOCOL: {"system", "user", "assistant", "tool"},
+}
+
+
+def validate_jetbrains_messages(protocol: str, messages: list[dict[str, Any]]) -> None:
+    from openai_compatible_bridge.core.images import validate_messages
+
+    validate_messages(messages, "jetbrains", protocol)
+
+
 class JetBrainsChatClient:
     """OpenAI Chat Completions client for JetBrains Grazie Gateway.
 
@@ -399,7 +415,8 @@ class JetBrainsChatClient:
                     result_block["is_error"] = True
                 _append_anthropic_turn(chat_messages, "user", [result_block])
             else:
-                _append_anthropic_turn(chat_messages, "user", content if content is not None else "")
+                from openai_compatible_bridge.core.images import anthropic_image_content
+                _append_anthropic_turn(chat_messages, "user", anthropic_image_content(content))
 
         if not chat_messages:
             chat_messages.append({"role": "user", "content": ""})
@@ -523,6 +540,7 @@ class JetBrainsChatClient:
         parallel_tool_calls: bool | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
+        validate_jetbrains_messages(protocol, messages)
         validate_jetbrains_parameters(
             protocol,
             reasoning_effort=reasoning_effort,

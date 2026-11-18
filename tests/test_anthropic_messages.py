@@ -219,3 +219,51 @@ def test_claude_code_to_gemini_multi_turn_tool_call_restores_thought_signature()
             assert model_turn["parts"][0]["functionCall"] == {"name": "read_file", "args": {"path": "main.py"}}
     finally:
         asyncio.run(jb.close())
+
+
+def test_base64_images_reach_all_jetbrains_protocols_from_all_ingresses() -> None:
+    from openai_compatible_bridge.providers.vertex import MODEL_REGISTRY
+
+    data_url = "data:image/png;base64,YQ=="
+    for protocol in ("openai_responses", "xai_responses", "anthropic_messages", "google_generate_content"):
+        for ingress in ("chat", "responses", "anthropic"):
+            captured = []
+            def handler(request: httpx.Request) -> httpx.Response:
+                captured.append(json.loads(request.content))
+                if protocol == "anthropic_messages":
+                    payload = {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}}
+                elif protocol == "google_generate_content":
+                    payload = {"candidates": [{"content": {"role": "model", "parts": [{"text": "ok"}]}, "finishReason": "STOP"}]}
+                else:
+                    payload = {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]}
+                return httpx.Response(200, json=payload)
+            jb = JetBrainsChatClient(base_url="https://grazie.test", token="test")
+            asyncio.run(jb.http.aclose())
+            jb.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            alias = "jetbrains:image-test"
+            old = MODEL_REGISTRY.copy()
+            MODEL_REGISTRY[alias] = {"provider": "jetbrains", "kind": "chat", "provider_model": "model", "protocol": protocol}
+            try:
+                if ingress == "chat":
+                    path = "/v1/chat/completions"
+                    payload = {"model": alias, "messages": [{"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": data_url}}]}]}
+                elif ingress == "responses":
+                    path = "/v1/responses"
+                    payload = {"model": alias, "input": [{"role": "user", "content": [{"type": "input_text", "text": "look"}, {"type": "input_image", "image_url": data_url}]}]}
+                else:
+                    path = "/v1/messages"
+                    payload = {"model": alias, "max_tokens": 32, "messages": [{"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "YQ=="}}]}]}
+                with TestClient(_make_app(jb)) as client:
+                    response = client.post(path, json=payload)
+                assert response.status_code == 200, (protocol, ingress, response.text)
+                assert len(captured) == 1
+                body = captured[0]
+                if protocol in {"openai_responses", "xai_responses"}:
+                    assert body["input"][0]["content"][1] == {"type": "input_image", "image_url": data_url}
+                elif protocol == "anthropic_messages":
+                    assert body["messages"][0]["content"][1] == {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "YQ=="}}
+                else:
+                    assert body["contents"][0]["parts"][1] == {"inlineData": {"mimeType": "image/png", "data": "YQ=="}}
+            finally:
+                MODEL_REGISTRY.clear()
+                MODEL_REGISTRY.update(old)

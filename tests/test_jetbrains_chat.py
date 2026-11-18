@@ -194,7 +194,6 @@ def test_jetbrains_anthropic_consecutive_turn_merging_and_is_error() -> None:
         messages=[
             {"role": "system", "content": "System 1"},
             {"role": "system", "content": "System 2"},
-            {"role": "developer", "content": "Dev instruction"},
             {"role": "user", "content": "User prompt"},
             {
                 "role": "assistant",
@@ -219,10 +218,10 @@ def test_jetbrains_anthropic_consecutive_turn_merging_and_is_error() -> None:
         parallel_tool_calls=False,
     )
     assert body["system"] == "System 1\n\nSystem 2"
-    # Consecutive developer + user merge into a single user turn, and tool + user merge into a single user turn
+    # Tool and user messages merge into a single user turn.
     assert len(body["messages"]) == 3
     assert body["messages"][0]["role"] == "user"
-    assert "Dev instruction\n\nUser prompt" == body["messages"][0]["content"]
+    assert "User prompt" == body["messages"][0]["content"]
     assert body["messages"][1]["role"] == "assistant"
     assert body["messages"][2]["role"] == "user"
     assert body["messages"][2]["content"][0] == {
@@ -462,3 +461,151 @@ def test_gemini_thought_signature_cached_and_restored_across_stateless_turns() -
     )
     vertex_model_turn = next(c for c in vertex_body["contents"] if c["role"] == "model")
     assert vertex_model_turn["parts"][0]["thoughtSignature"] == "sig-gemini-turn-1"
+
+
+@pytest.mark.parametrize("protocol,message,field", [
+    ("anthropic_messages", {"role": "developer", "content": "x"}, "role"),
+    ("google_generate_content", {"role": "developer", "content": "x"}, "role"),
+    ("xai_responses", {"role": "unknown", "content": "x"}, "role"),
+    ("openai_responses", {"role": "user", "content": "x", "name": "alice"}, "name"),
+    ("openai_responses", {"role": "tool", "content": "x"}, "tool_call_id"),
+    ("openai_responses", {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]}, "image_url"),
+    ("openai_responses", {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ==", "detail": "high"}}]}, "detail"),
+])
+def test_jetbrains_invalid_messages_fail_before_upstream(protocol, message, field):
+    old_registry = _register_jetbrains_alias(protocol=protocol)
+    fake = _FakeJetBrains()
+    app = create_app(embedding_client_factory=_FakeProvider, chat_client_factory=_FakeProvider,
+                     rerank_client_factory=_FakeProvider, ollama_chat_client_factory=_FakeProvider,
+                     foundry_chat_client_factory=_FakeProvider, jetbrains_chat_client_factory=lambda: fake,
+                     cost_accounting_factory=lambda: None)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/chat/completions", json={"model": "jetbrains:openai-gpt-5-4", "messages": [message], "stream": True})
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert field in error["param"]
+        assert protocol in error["message"]
+        assert error["code"] == "invalid_request_error"
+        assert not fake.calls
+    finally:
+        _restore_registry(old_registry)
+
+
+def test_responses_developer_rejected_before_stream_for_anthropic():
+    old = _register_jetbrains_alias(protocol="anthropic_messages")
+    fake = _FakeJetBrains()
+    app = create_app(embedding_client_factory=_FakeProvider, chat_client_factory=_FakeProvider,
+                     rerank_client_factory=_FakeProvider, ollama_chat_client_factory=_FakeProvider,
+                     foundry_chat_client_factory=_FakeProvider, jetbrains_chat_client_factory=lambda: fake,
+                     cost_accounting_factory=lambda: None)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/responses", json={"model": "jetbrains:openai-gpt-5-4", "input": [{"role": "developer", "content": "rule"}], "stream": True})
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request_error"
+        assert response.json()["error"]["param"] == "messages[0].role"
+        assert "anthropic_messages" in response.json()["error"]["message"]
+        assert not fake.calls
+    finally:
+        _restore_registry(old)
+
+
+def test_anthropic_unrepresentable_field_fails_before_upstream():
+    fake = _FakeJetBrains()
+    app = create_app(embedding_client_factory=_FakeProvider, chat_client_factory=_FakeProvider,
+                     rerank_client_factory=_FakeProvider, ollama_chat_client_factory=_FakeProvider,
+                     foundry_chat_client_factory=_FakeProvider, jetbrains_chat_client_factory=lambda: fake,
+                     cost_accounting_factory=lambda: None)
+    with TestClient(app) as client:
+        response = client.post("/v1/messages", json={"model": "jetbrains:gpt-5.4", "max_tokens": 10, "messages": [{"role": "user", "content": "hi", "name": "alice"}], "stream": True})
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "messages[0].name" in response.json()["error"]["message"]
+    assert not fake.calls
+
+
+def test_base64_image_transforms_preserve_data():
+    from openai_compatible_bridge.core.transforms import _google_contents_and_system, _openai_input_messages
+    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}}]}]
+    assert _openai_input_messages(messages)[0]["content"][0] == {"type": "input_image", "image_url": "data:image/png;base64,YQ=="}
+    assert _google_contents_and_system(messages)[0][0]["parts"][0] == {"inlineData": {"mimeType": "image/png", "data": "YQ=="}}
+
+
+@pytest.mark.parametrize("provider,protocol,message,field", [
+    ("vertex", "google_generate_content", {"role": "developer", "content": "x"}, "role"),
+    ("vertex", "google_generate_content", {"role": "user", "content": "x", "name": "n"}, "name"),
+    ("foundry", "anthropic_messages", {"role": "developer", "content": "x"}, "role"),
+    ("foundry", "xai_responses", {"role": "user", "content": "x", "name": "n"}, "name"),
+    ("foundry", "openai_chat_completions", {"role": "unknown", "content": "x"}, "role"),
+    ("openai_compatible", "openai_chat_completions", {"role": "unknown", "content": "x"}, "role"),
+    ("ollama", "ollama_chat", {"role": "developer", "content": "x"}, "role"),
+    ("ollama", "ollama_chat", {"role": "tool", "tool_call_id": "id", "content": "x"}, "tool_call_id"),
+    ("foundry", "google_generate_content", {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.org/a"}}]}, "image_url"),
+    ("openai_compatible", "openai_chat_completions", {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ==", "detail": "auto"}}]}, "detail"),
+])
+def test_other_providers_invalid_messages_fail_before_stream(provider, protocol, message, field):
+    old = vertex.MODEL_REGISTRY.copy()
+    alias = "guard-test"
+    cfg = {"provider": provider, "kind": "chat", "provider_model": "model"}
+    if provider == "foundry":
+        cfg["protocol"] = protocol
+    if provider == "vertex":
+        cfg.update({"api": "generateContent", "location": "global", "vertex_model": "model"})
+    vertex.MODEL_REGISTRY[alias] = cfg
+    fake = _FakeJetBrains()
+    app = create_app(embedding_client_factory=_FakeProvider, chat_client_factory=lambda: fake,
+                     rerank_client_factory=_FakeProvider, ollama_chat_client_factory=lambda: fake,
+                     foundry_chat_client_factory=lambda: fake, jetbrains_chat_client_factory=_FakeProvider,
+                     openai_compatible_chat_client_factory=lambda: fake, cost_accounting_factory=lambda: None)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/chat/completions", json={"model": alias, "messages": [message], "stream": True})
+        assert response.status_code == 400, response.text
+        error = response.json()["error"]
+        assert field in error["param"]
+        assert protocol in error["message"]
+        assert error["code"] == "invalid_request_error"
+        assert not fake.calls
+    finally:
+        vertex.MODEL_REGISTRY.clear()
+        vertex.MODEL_REGISTRY.update(old)
+
+
+def test_non_jetbrains_image_builders_preserve_base64():
+    from openai_compatible_bridge.providers.foundry import FoundryChatClient
+    from openai_compatible_bridge.providers.vertex import VertexChatClient
+    messages = [{"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}}]}]
+    anthropic = FoundryChatClient._build_anthropic_request_body(model="m", messages=messages, max_tokens=8, stop=None, stream=False)
+    assert anthropic["messages"][0]["content"][1]["source"]["data"] == "YQ=="
+    google = VertexChatClient._build_request_body(messages=messages, max_tokens=8, temperature=None, top_p=None, stop=None)
+    assert google["contents"][0]["parts"][1] == {"inlineData": {"mimeType": "image/png", "data": "YQ=="}}
+
+
+@pytest.mark.parametrize("endpoint,payload,field", [
+    ("/v1/responses", {"input": [{"role": "developer", "content": "rules"}]}, "role"),
+    ("/v1/responses", {"input": [{"role": "user", "content": [{"type": "input_image", "file_id": "file-1"}]}]}, "file_id"),
+    ("/v1/responses", {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,YQ==", "detail": "auto"}]}]}, "detail"),
+    ("/v1/messages", {"max_tokens": 16, "messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": "https://example.org/a"}}]}]}, "source"),
+])
+def test_non_jetbrains_ingresses_reject_before_stream(endpoint, payload, field):
+    old = vertex.MODEL_REGISTRY.copy()
+    vertex.MODEL_REGISTRY["guard-test"] = {"provider": "foundry", "kind": "chat", "provider_model": "m", "protocol": "anthropic_messages"}
+    fake = _FakeJetBrains()
+    app = create_app(embedding_client_factory=_FakeProvider, chat_client_factory=_FakeProvider,
+                     rerank_client_factory=_FakeProvider, ollama_chat_client_factory=_FakeProvider,
+                     foundry_chat_client_factory=lambda: fake, jetbrains_chat_client_factory=_FakeProvider,
+                     cost_accounting_factory=lambda: None)
+    try:
+        with TestClient(app) as client:
+            response = client.post(endpoint, json={"model": "guard-test", "stream": True, **payload})
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert field in error["message"]
+        assert error.get("code", error.get("type")) == "invalid_request_error"
+        if endpoint == "/v1/responses":
+            assert field in error["param"]
+        assert not fake.calls
+    finally:
+        vertex.MODEL_REGISTRY.clear()
+        vertex.MODEL_REGISTRY.update(old)
