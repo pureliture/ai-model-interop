@@ -83,7 +83,7 @@ def test_claude_code_dynamic_routing_and_effort_mapping_across_gpt_grok_claude()
             assert captured[0][1] == "openai"
             assert captured[0][2]["reasoning"] == {"effort": "high"}
 
-            # 2. Dynamic Grok route with output_config.effort = "max" -> clamped to "xhigh"
+            # 2. Dynamic Grok route with output_config.effort = "max" is not supported -> 400
             r_grok = client.post(
                 "/v1/messages",
                 json={
@@ -93,21 +93,34 @@ def test_claude_code_dynamic_routing_and_effort_mapping_across_gpt_grok_claude()
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
-            assert r_grok.status_code == 200, r_grok.text
-            assert r_grok.json()["content"][0]["text"] == "hello from grok"
+            assert r_grok.status_code == 400, r_grok.text
+            assert len(captured) == 1, "unsupported effort must be rejected before upstream"
+
+            # 2b. Supported Grok effort passes through unchanged.
+            r_grok_ok = client.post(
+                "/v1/messages",
+                json={
+                    "model": "jetbrains:grok-3",
+                    "max_tokens": 512,
+                    "output_config": {"effort": "high"},
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            assert r_grok_ok.status_code == 200, r_grok_ok.text
+            assert r_grok_ok.json()["content"][0]["text"] == "hello from grok"
             assert captured[1][0] == "/v1/responses"
             assert captured[1][1] == "grok"
-            assert captured[1][2]["reasoning"] == {"effort": "xhigh"}
+            assert captured[1][2]["reasoning"] == {"effort": "high"}
 
-            # 3. Dynamic Claude route with output_config.effort = "medium" and disable_parallel_tool_use
+            # 3. Dynamic Claude route with output_config.effort = "medium" passthrough.
             r_claude = client.post(
                 "/v1/messages",
                 json={
                     "model": "jetbrains:claude-sonnet-4-5",
-                    "max_tokens": 1024,
+                    "max_tokens": 8192,
                     "output_config": {"effort": "medium"},
                     "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
-                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+                    "tool_choice": {"type": "auto"},
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
@@ -115,9 +128,24 @@ def test_claude_code_dynamic_routing_and_effort_mapping_across_gpt_grok_claude()
             assert r_claude.json()["content"][0]["text"] == "hello from claude"
             assert captured[2][0] == "/v1/messages"
             assert captured[2][1] == "anthropic"
-            assert captured[2][2]["thinking"] == {"type": "enabled", "budget_tokens": 4096}
-            assert captured[2][2]["max_tokens"] == 4096 + 4096
-            assert captured[2][2]["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+            assert captured[2][2]["output_config"] == {"effort": "medium"}
+            assert captured[2][2]["thinking"] == {"type": "adaptive"}
+            assert captured[2][2]["max_tokens"] == 8192
+            assert captured[2][2]["tool_choice"] == {"type": "auto"}
+
+            # 3b. disable_parallel_tool_use is unsupported on this route -> 400, no silent mapping.
+            r_parallel = client.post(
+                "/v1/messages",
+                json={
+                    "model": "jetbrains:claude-sonnet-4-5",
+                    "max_tokens": 1024,
+                    "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
+                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            assert r_parallel.status_code == 400, r_parallel.text
+            assert len(captured) == 3
     finally:
         asyncio.run(jb.close())
 
@@ -187,7 +215,7 @@ def test_claude_code_to_gemini_multi_turn_tool_call_restores_thought_signature()
             assert t1_body["stop_reason"] == "tool_use"
             tool_use_block = t1_body["content"][0]
             tool_use_id = tool_use_block["id"]
-            assert captured_bodies[0]["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 1024}
+            assert captured_bodies[0]["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "LOW"}
 
             # Turn 2: Claude Code sends back tool_use and tool_result (without Gemini thoughtSignature)
             t2 = client.post(

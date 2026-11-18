@@ -326,7 +326,6 @@ def _resolve_chat_model(model: str, discovered: dict[str, dict[str, Any]] | None
             "provider": "jetbrains",
             "kind": "chat",
             "provider_model": provider_model,
-            "protocol": infer_jetbrains_protocol(provider_model),
         }
         token = (os.getenv("JETBRAINS_AI_TOKEN") or "").strip()
         if token:
@@ -2055,7 +2054,6 @@ async def create_anthropic_messages(
             "provider": "jetbrains",
             "kind": "chat",
             "provider_model": native,
-            "protocol": infer_jetbrains_protocol(native),
         }
         provider_model = native
     elif params["model"] not in current_allowed_models():

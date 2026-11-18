@@ -225,7 +225,7 @@ def responses_input_to_messages(
                 inferred_custom_tools.add(name)
                 raw_input = item.get("input", "")
                 args_str = json.dumps(
-                    {"input": "" if raw_input is None else str(raw_input)},
+                    {"input": _stringify_input_value(raw_input)},
                     ensure_ascii=False,
                 )
             else:

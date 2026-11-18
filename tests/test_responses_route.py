@@ -83,10 +83,11 @@ def test_codex_to_claude_non_stream_and_sse_stream() -> None:
             assert data["output"][0]["content"][0]["text"] == "Refactored UserService."
             assert data["usage"] == {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
 
-            # Verify upstream Anthropic request had thinking budget and adjusted max_tokens
+            # Verify upstream Anthropic request passes effort through without budget/max_tokens rewrite
             assert captured_bodies[0]["system"] == "You are Codex."
-            assert captured_bodies[0]["thinking"] == {"type": "enabled", "budget_tokens": 16384}
-            assert captured_bodies[0]["max_tokens"] == 16384 + 4096
+            assert captured_bodies[0]["output_config"] == {"effort": "high"}
+            assert captured_bodies[0]["thinking"] == {"type": "adaptive"}
+            assert captured_bodies[0]["max_tokens"] == 2048
 
             # SSE streaming
             with client.stream(
@@ -174,7 +175,6 @@ def test_codex_to_claude_apply_patch_custom_tool_and_previous_response_id() -> N
                     "tools": [
                         {"type": "custom", "name": "apply_patch", "description": "Patch files"},
                     ],
-                    "parallel_tool_calls": False,
                 },
             )
             assert turn1.status_code == 400
@@ -199,12 +199,25 @@ def test_codex_to_claude_apply_patch_custom_tool_and_previous_response_id() -> N
                 "input": patch_payload,
             }
 
-            # Verify the representable retry still maps tools and parallel_tool_calls=False.
+            # Verify the representable retry still maps tools (parallel_tool_calls unsupported -> 400).
             assert len(captured_bodies[0]["messages"]) == 1
             assert captured_bodies[0]["messages"][0]["role"] == "user"
             assert "Fix src/user.py" in captured_bodies[0]["messages"][0]["content"]
             assert captured_bodies[0]["tools"][0]["name"] == "apply_patch"
-            assert captured_bodies[0]["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+            assert "tool_choice" not in captured_bodies[0]
+
+            # parallel_tool_calls on Anthropic protocol is rejected, not mapped.
+            parallel_rejected = client.post(
+                "/v1/responses",
+                json={
+                    "model": "jetbrains:claude-sonnet-4-5",
+                    "input": "hi",
+                    "tools": [{"type": "custom", "name": "apply_patch", "description": "Patch files"}],
+                    "parallel_tool_calls": False,
+                },
+            )
+            assert parallel_rejected.status_code == 400, parallel_rejected.text
+            assert parallel_rejected.json()["error"]["code"] == "unsupported_parameter"
 
             # Turn 2: Codex continues using previous_response_id and custom_tool_call_output
             turn2 = client.post(

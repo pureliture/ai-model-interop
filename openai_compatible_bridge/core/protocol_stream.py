@@ -131,7 +131,8 @@ class ProtocolStream:
                     tool_block["is_error"] = True
                 _append_anthropic_turn(chat_messages, "user", [tool_block])
             else:
-                _append_anthropic_turn(chat_messages, "user", content if content is not None else "")
+                from openai_compatible_bridge.core.images import anthropic_image_content
+                _append_anthropic_turn(chat_messages, "user", anthropic_image_content(content))
 
         if not chat_messages:
             chat_messages.append({"role": "user", "content": ""})
