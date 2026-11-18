@@ -48,7 +48,7 @@ def test_responses_input_preserves_images_with_tools():
     items = _xai_input_messages(USER)
     assert items == [{"role": "user", "content": [
         {"type": "input_text", "text": "describe"},
-        {"type": "input_image", "detail": "auto", "image_url": DATA_URL},
+        {"type": "input_image", "image_url": DATA_URL},
     ]}]
 
 

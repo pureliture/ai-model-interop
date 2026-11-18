@@ -164,6 +164,7 @@ class FoundryChatClient(ProtocolStream):
         return headers
 
 
+
     async def generate(
         self,
         *,

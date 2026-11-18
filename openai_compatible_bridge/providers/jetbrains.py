@@ -17,8 +17,11 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
+from openai_compatible_bridge.core.conversation_state import (
+    ConversationStateCache,
+    get_default_conversation_state_cache,
+)
 from openai_compatible_bridge.providers.jetbrains_oauth import JetBrainsOAuthError, JetBrainsOAuthStore
-
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
 from openai_compatible_bridge.core.http_timeout import http_timeout_seconds
 from openai_compatible_bridge.core.protocol_stream import ProtocolStream
@@ -69,16 +72,50 @@ JETBRAINS_GOOGLE_PATH_PREFIX = "/v1beta1/projects/jetbrains-grazie/locations/glo
 GRAZIE_AGENT_HEADER = '{"name":"junie:cli","version":" "}'
 
 
-def _grazie_headers(llm_model: str, token: str) -> dict[str, str]:
+def infer_jetbrains_protocol(model_name: str | None) -> str:
+    """Infer JetBrains Grazie protocol from a model identifier when protocol is omitted."""
+    raw = str(model_name or "").strip().lower()
+    if raw.startswith("jetbrains:"):
+        raw = raw[len("jetbrains:") :].strip()
+    base = raw.split("/")[-1].split(":")[-1].strip()
+    if base.startswith("claude"):
+        return JETBRAINS_ANTHROPIC_PROTOCOL
+    if base.startswith("gemini"):
+        return JETBRAINS_GOOGLE_PROTOCOL
+    if base.startswith("grok"):
+        return JETBRAINS_XAI_PROTOCOL
+    return JETBRAINS_OPENAI_PROTOCOL
+
+
+def _grazie_headers(
+    llm_model: str,
+    token: str,
+    *,
+    auth_mode: str | None = None,
+    grazie_agent: str | None = None,
+) -> dict[str, str]:
     """Grazie Gateway 라우팅 헤더를 생성한다."""
-    headers = {
-        "Authorization": f"Bearer {token}",
+    effective_auth_mode = (auth_mode or os.getenv("JETBRAINS_AI_AUTH_MODE") or "bearer").strip().lower()
+    effective_agent = (
+        (grazie_agent if grazie_agent is not None else os.getenv("JETBRAINS_GRAZIE_AGENT")) or GRAZIE_AGENT_HEADER
+    ).strip() or GRAZIE_AGENT_HEADER
+    headers: dict[str, str] = {
         "Content-Type": "application/json",
-        "Grazie-Agent": GRAZIE_AGENT_HEADER,
+        "Grazie-Agent": effective_agent,
         "X-LLM-Model": llm_model,
         "X-Keep-Path": "true",
         "X-Accept-EAP-License": "false",
     }
+    if effective_auth_mode in {"bearer", "authorization", ""}:
+        headers["Authorization"] = f"Bearer {token}"
+    elif effective_auth_mode in {"jwt", "grazie-jwt", "grazie_authenticate_jwt", "personal"}:
+        headers["Grazie-Authenticate-JWT"] = token
+    else:
+        raise VertexAPIError(
+            503,
+            f"Unsupported JETBRAINS_AI_AUTH_MODE: {effective_auth_mode!r}.",
+            code="provider_config_error",
+        )
     if llm_model == "google":
         headers["X-Free-Google-Api"] = "true"
     if llm_model == "anthropic":
@@ -104,9 +141,13 @@ def _anthropic_thinking_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
     return blocks
 
 
-def validate_jetbrains_parameters(protocol: str, *, reasoning_effort: str | None = None,
-                                   parallel_tool_calls: bool | None = None,
-                                   response_format: dict[str, Any] | None = None) -> None:
+def validate_jetbrains_parameters(
+    protocol: str,
+    *,
+    reasoning_effort: str | None = None,
+    parallel_tool_calls: bool | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> None:
     if reasoning_effort is not None:
         known = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
         supported = {
@@ -125,10 +166,29 @@ def validate_jetbrains_parameters(protocol: str, *, reasoning_effort: str | None
         raise VertexAPIError(400, "parallel_tool_calls is not supported for this JetBrains protocol.", code="unsupported_parameter")
     if protocol == JETBRAINS_ANTHROPIC_PROTOCOL and response_format is not None:
         raise VertexAPIError(400, "response_format is not supported for this JetBrains protocol.", code="unsupported_parameter")
-    if (protocol in {JETBRAINS_OPENAI_PROTOCOL, JETBRAINS_XAI_PROTOCOL}
-            and response_format is not None and response_format.get("type") == "json_schema"
-            and not isinstance(response_format.get("json_schema"), dict)):
+    if (
+        protocol in {JETBRAINS_OPENAI_PROTOCOL, JETBRAINS_XAI_PROTOCOL}
+        and response_format is not None
+        and response_format.get("type") == "json_schema"
+        and not isinstance(response_format.get("json_schema"), dict)
+    ):
         raise VertexAPIError(400, "Invalid json_schema response format.", code="invalid_request_error")
+
+
+# Allowed message roles by target protocol. Tool results require a linkage ID;
+# message metadata is rejected unless the target conversion preserves it.
+JETBRAINS_MESSAGE_ROLES = {
+    JETBRAINS_OPENAI_PROTOCOL: {"system", "developer", "user", "assistant", "tool"},
+    JETBRAINS_XAI_PROTOCOL: {"system", "user", "assistant", "tool"},
+    JETBRAINS_ANTHROPIC_PROTOCOL: {"system", "user", "assistant", "tool"},
+    JETBRAINS_GOOGLE_PROTOCOL: {"system", "user", "assistant", "tool"},
+}
+
+
+def validate_jetbrains_messages(protocol: str, messages: list[dict[str, Any]]) -> None:
+    from openai_compatible_bridge.core.images import validate_messages
+
+    validate_messages(messages, "jetbrains", protocol)
 
 
 class JetBrainsChatClient:
@@ -152,9 +212,16 @@ class JetBrainsChatClient:
         *,
         base_url: str | None = None,
         token: str | None = None,
+        auth_mode: str | None = None,
+        grazie_agent: str | None = None,
+        state_cache: ConversationStateCache | None = None,
     ) -> None:
         self.base_url = (base_url if base_url is not None else JETBRAINS_AI_BASE_URL).strip().rstrip("/")
         self.token = token if token is not None else JETBRAINS_AI_TOKEN
+        self.auth_mode = auth_mode
+        self.grazie_agent = grazie_agent
+        self.state_cache = state_cache if state_cache is not None else get_default_conversation_state_cache()
+        self._active_resolved_config: dict[str, Any] | None = None
         oauth_path = os.getenv("JETBRAINS_AI_OAUTH_FILE", "").strip()
         self.oauth_store = JetBrainsOAuthStore(oauth_path) if oauth_path and token is None and not self.token else None
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS))
@@ -162,10 +229,11 @@ class JetBrainsChatClient:
     async def close(self) -> None:
         await self.http.aclose()
 
-    def _protocol(self, resolved_config: dict[str, Any] | None) -> str:
-        protocol = (resolved_config or {}).get("protocol", JETBRAINS_OPENAI_PROTOCOL)
-        if protocol is None:
-            protocol = JETBRAINS_OPENAI_PROTOCOL
+    def _protocol(self, resolved_config: dict[str, Any] | None, *, model: str | None = None) -> str:
+        cfg = resolved_config or {}
+        protocol = cfg.get("protocol")
+        if not protocol:
+            protocol = infer_jetbrains_protocol(cfg.get("provider_model") or model)
         if protocol not in {
             JETBRAINS_OPENAI_PROTOCOL,
             JETBRAINS_ANTHROPIC_PROTOCOL,
@@ -222,14 +290,21 @@ class JetBrainsChatClient:
             JETBRAINS_GOOGLE_PROTOCOL: "google",
         }.get(protocol, "openai")
 
-    def _headers(self, protocol: str) -> dict[str, str]:
-        if not self.token:
+    def _headers(self, protocol: str, *, resolved_config: dict[str, Any] | None = None) -> dict[str, str]:
+        cfg = resolved_config if resolved_config is not None else (self._active_resolved_config or {})
+        effective_token = (cfg.get("api_key") or self.token or "").strip()
+        if not effective_token:
             raise VertexAPIError(
                 503,
                 "JETBRAINS_AI_TOKEN is not configured.",
                 code="provider_config_error",
             )
-        return _grazie_headers(self._llm_model_header(protocol), self.token)
+        return _grazie_headers(
+            self._llm_model_header(protocol),
+            effective_token,
+            auth_mode=cfg.get("auth_mode") or self.auth_mode,
+            grazie_agent=cfg.get("grazie_agent") or self.grazie_agent,
+        )
 
     async def _request_token(self) -> str:
         if self.token:
@@ -251,10 +326,11 @@ class JetBrainsChatClient:
         top_p: float | None,
         stop: str | list[str] | None,
         response_format: dict[str, Any] | None,
+        reasoning_effort: str | None = None,
+        protocol: str = JETBRAINS_OPENAI_PROTOCOL,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
-        reasoning_effort: str | None = None,
         stream: bool,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -262,8 +338,6 @@ class JetBrainsChatClient:
             "input": _xai_input_messages(messages),
             "stream": stream,
         }
-        if reasoning_effort is not None:
-            body["reasoning"] = {"effort": reasoning_effort}
         if max_tokens is not None:
             body["max_output_tokens"] = max_tokens
         if temperature is not None:
@@ -272,6 +346,8 @@ class JetBrainsChatClient:
             body["top_p"] = top_p
         if stop is not None:
             body["stop"] = stop
+        if reasoning_effort is not None:
+            body["reasoning"] = {"effort": reasoning_effort}
         if response_format is not None:
             format_type = response_format.get("type")
             if format_type == "json_object":
@@ -284,7 +360,7 @@ class JetBrainsChatClient:
         if tools is not None:
             grazie_tools: list[dict[str, Any]] = []
             for t in tools:
-                fn = t.get("function", {}) if t.get("type") == "function" else t
+                fn = t.get("function") if t.get("type") == "function" and isinstance(t.get("function"), dict) else t
                 grazie_tools.append(
                     {
                         "type": "function",
@@ -318,9 +394,10 @@ class JetBrainsChatClient:
         top_p: float | None,
         stop: str | list[str] | None,
         stream: bool,
+        reasoning_effort: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
-        reasoning_effort: str | None = None,
+        **_: Any,
     ) -> dict[str, Any]:
         system_parts: list[str] = []
         chat_messages: list[dict[str, Any]] = []
@@ -374,38 +451,29 @@ class JetBrainsChatClient:
                                 "input": input_dict,
                             }
                         )
-                    chat_messages.append({"role": "assistant", "content": blocks})
+                    _append_anthropic_turn(chat_messages, "assistant", blocks)
                 else:
-                    chat_messages.append({"role": "assistant", "content": content})
+                    _append_anthropic_turn(chat_messages, "assistant", content if content is not None else "")
             elif role == "tool":
                 call_id = message.get("tool_call_id") or message.get("id") or ""
-                content_text = _extract_message_text(content) if content is not None else ""
-                result_block = {
+                if isinstance(content, (dict, list)):
+                    content_text = json.dumps(content, ensure_ascii=False)
+                else:
+                    content_text = _extract_message_text(content) if content is not None else ""
+                result_block: dict[str, Any] = {
                     "type": "tool_result",
                     "tool_use_id": call_id,
                     "content": content_text,
                 }
-                # Anthropic requires tool_result in user turn
-                if chat_messages and chat_messages[-1]["role"] == "user" and isinstance(chat_messages[-1].get("content"), list):
-                    chat_messages[-1]["content"].append(result_block)
-                else:
-                    chat_messages.append({"role": "user", "content": [result_block]})
+                if message.get("is_error"):
+                    result_block["is_error"] = True
+                _append_anthropic_turn(chat_messages, "user", [result_block])
             else:
-                if not isinstance(content, list):
-                    chat_messages.append({"role": role, "content": content})
-                    continue
-                blocks = normalize_content(content)
-                mapped: list[dict[str, Any]] = []
-                for block in blocks:
-                    if block["type"] == "text":
-                        mapped.append({"type": "text", "text": block["text"]})
-                    else:
-                        mapped.append({"type": "image", "source": {
-                            "type": "base64", "media_type": block["mime_type"],
-                            "data": block["data"],
-                        }})
-                chat_messages.append({"role": role, "content": mapped})
+                from openai_compatible_bridge.core.images import anthropic_image_content
+                _append_anthropic_turn(chat_messages, "user", anthropic_image_content(content))
 
+        if not chat_messages:
+            chat_messages.append({"role": "user", "content": ""})
         body: dict[str, Any] = {
             "model": model,
             "messages": chat_messages,
@@ -426,7 +494,7 @@ class JetBrainsChatClient:
         if tools is not None:
             grazie_tools: list[dict[str, Any]] = []
             for t in tools:
-                fn = t.get("function", {}) if t.get("type") == "function" else t
+                fn = t.get("function") if t.get("type") == "function" and isinstance(t.get("function"), dict) else t
                 grazie_tools.append(
                     {
                         "name": fn.get("name", ""),
@@ -435,20 +503,24 @@ class JetBrainsChatClient:
                     }
                 )
             body["tools"] = grazie_tools
+
+        anthropic_tool_choice: dict[str, Any] | None = None
         if tool_choice is not None:
             if tool_choice == "auto":
-                body["tool_choice"] = {"type": "auto"}
+                anthropic_tool_choice = {"type": "auto"}
             elif tool_choice == "none":
-                body["tool_choice"] = {"type": "none"}
+                anthropic_tool_choice = {"type": "none"}
             elif tool_choice == "required":
-                body["tool_choice"] = {"type": "any"}
+                anthropic_tool_choice = {"type": "any"}
             elif isinstance(tool_choice, dict):
                 fn_dict = tool_choice.get("function")
                 name = fn_dict.get("name") if isinstance(fn_dict, dict) else tool_choice.get("name")
-                if name:
-                    body["tool_choice"] = {"type": "tool", "name": name}
+                if name and tool_choice.get("type") in (None, "function", "tool"):
+                    anthropic_tool_choice = {"type": "tool", "name": name}
                 else:
-                    body["tool_choice"] = tool_choice
+                    anthropic_tool_choice = dict(tool_choice)
+        if anthropic_tool_choice is not None:
+            body["tool_choice"] = anthropic_tool_choice
         return body
 
     @staticmethod
@@ -460,11 +532,12 @@ class JetBrainsChatClient:
         top_p: float | None,
         stop: str | list[str] | None,
         response_format: dict[str, Any] | None,
+        reasoning_effort: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
-        reasoning_effort: str | None = None,
+        state_cache: ConversationStateCache | None = None,
     ) -> dict[str, Any]:
-        contents, system_parts = _google_contents_and_system(messages)
+        contents, system_parts = _google_contents_and_system(messages, state_cache=state_cache)
         body: dict[str, Any] = {"contents": contents}
         if system_parts:
             body["systemInstruction"] = {"parts": system_parts}
@@ -507,8 +580,13 @@ class JetBrainsChatClient:
         parallel_tool_calls: bool | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
-        validate_jetbrains_parameters(protocol, reasoning_effort=reasoning_effort,
-                                     parallel_tool_calls=parallel_tool_calls, response_format=response_format)
+        validate_jetbrains_messages(protocol, messages)
+        validate_jetbrains_parameters(
+            protocol,
+            reasoning_effort=reasoning_effort,
+            parallel_tool_calls=parallel_tool_calls,
+            response_format=response_format,
+        )
         if protocol == JETBRAINS_OPENAI_PROTOCOL or protocol == JETBRAINS_XAI_PROTOCOL:
             return self._build_openai_request_body(
                 model=model,
@@ -518,10 +596,11 @@ class JetBrainsChatClient:
                 top_p=top_p,
                 stop=stop,
                 response_format=response_format,
+                reasoning_effort=reasoning_effort,
+                protocol=protocol,
                 tools=tools,
                 tool_choice=tool_choice,
                 parallel_tool_calls=parallel_tool_calls,
-                reasoning_effort=reasoning_effort,
                 stream=stream,
             )
         if protocol == JETBRAINS_ANTHROPIC_PROTOCOL:
@@ -533,9 +612,10 @@ class JetBrainsChatClient:
                 top_p=top_p,
                 stop=stop,
                 stream=stream,
+                reasoning_effort=reasoning_effort,
                 tools=tools,
                 tool_choice=tool_choice,
-                reasoning_effort=reasoning_effort,
+                parallel_tool_calls=parallel_tool_calls,
             )
         if protocol == JETBRAINS_GOOGLE_PROTOCOL:
             return self._build_google_request_body(
@@ -545,9 +625,10 @@ class JetBrainsChatClient:
                 top_p=top_p,
                 stop=stop,
                 response_format=response_format,
+                reasoning_effort=reasoning_effort,
                 tools=tools,
                 tool_choice=tool_choice,
-                reasoning_effort=reasoning_effort,
+                state_cache=self.state_cache,
             )
         raise VertexAPIError(503, f"Unsupported protocol: {protocol}", code="provider_config_error")
 
@@ -568,13 +649,16 @@ class JetBrainsChatClient:
         reasoning_effort: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
-        protocol = self._protocol(resolved_config)
-        llm_model = self._llm_model_header(protocol)
-        url = self._url_for_protocol(protocol, model=(resolved_config or {}).get("provider_model", model), stream=False)
-        headers = _grazie_headers(self._llm_model_header(protocol), await self._request_token())
+        native_model = (resolved_config or {}).get("provider_model", model)
+        protocol = self._protocol(resolved_config, model=native_model)
+        url = self._url_for_protocol(protocol, model=native_model, stream=False)
+        effective_headers_config = dict(resolved_config or {})
+        if not (effective_headers_config.get("api_key") or self.token or "").strip():
+            effective_headers_config["api_key"] = await self._request_token()
+        headers = self._headers(protocol, resolved_config=effective_headers_config)
         body = self._build_request_body(
             protocol=protocol,
-            model=(resolved_config or {}).get("provider_model", model),
+            model=native_model,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -610,7 +694,7 @@ class JetBrainsChatClient:
             raise VertexAPIError(502, "Malformed JetBrains Responses response.", code="bad_gateway")
 
         if protocol == JETBRAINS_GOOGLE_PROTOCOL:
-            return _google_response_result(payload)
+            return _google_response_result(payload, state_cache=self.state_cache)
         elif protocol == JETBRAINS_ANTHROPIC_PROTOCOL:
             # Anthropic response → OpenAI format
             content = payload.get("content", [])
@@ -699,13 +783,20 @@ class JetBrainsChatClient:
     ):
 
         native_model = (resolved_config or {}).get("provider_model", model)
+        protocol = self._protocol(resolved_config, model=native_model)
+        effective_config = {**(resolved_config or {}), "provider_model": native_model, "protocol": protocol}
         request_client = copy.copy(self)
         request_client.token = await self._request_token()
-        async for event in ProtocolStream.stream_chat(
-            request_client, model=native_model, messages=messages, max_tokens=max_tokens,
-            temperature=temperature, top_p=top_p, stop=stop,
-            response_format=response_format, resolved_config=resolved_config,
-            tools=tools, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
-            reasoning_effort=reasoning_effort, _require_complete=True,
-        ):
-            yield event
+        prev_cfg = request_client._active_resolved_config
+        request_client._active_resolved_config = effective_config
+        try:
+            async for event in ProtocolStream.stream_chat(
+                request_client, model=native_model, messages=messages, max_tokens=max_tokens,
+                temperature=temperature, top_p=top_p, stop=stop,
+                response_format=response_format, resolved_config=effective_config,
+                tools=tools, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
+                reasoning_effort=reasoning_effort, _require_complete=True,
+            ):
+                yield event
+        finally:
+            request_client._active_resolved_config = prev_cfg

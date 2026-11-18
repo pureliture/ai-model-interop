@@ -43,7 +43,20 @@ from openai_compatible_bridge.anthropic_ingress import (
     parse_anthropic_chat_params,
     sse_event,
 )
+from openai_compatible_bridge.responses_ingress import (
+    ResponsesBadRequest,
+    ResponsesStreamState,
+    build_assistant_history_message,
+    new_response_id,
+    openai_result_to_responses,
+    parse_responses_chat_params,
+    responses_sse_event,
+)
 from openai_compatible_bridge.core.async_cost import AsyncCostAccounting, build_async_cost_accounting
+from openai_compatible_bridge.core.conversation_state import (
+    ConversationStateCache,
+    get_default_conversation_state_cache,
+)
 from openai_compatible_bridge.core.cost_tracking import (
     BudgetBlock,
     BudgetReservationContext,
@@ -54,7 +67,12 @@ from openai_compatible_bridge.core.cost_tracking import (
     NormalizedUsage,
 )
 from openai_compatible_bridge.providers.foundry import FoundryChatClient
-from openai_compatible_bridge.providers.jetbrains import JetBrainsChatClient, validate_jetbrains_parameters
+from openai_compatible_bridge.providers.jetbrains import (
+    JetBrainsChatClient,
+    infer_jetbrains_protocol,
+    validate_jetbrains_parameters,
+    validate_jetbrains_messages,
+)
 from openai_compatible_bridge.junie_discovery import discovery_from_env
 from openai_compatible_bridge.providers.ollama import OllamaChatClient
 from openai_compatible_bridge.providers.openai_compatible import (
@@ -963,6 +981,7 @@ async def lifespan(app: FastAPI):
     app.state.vertex_chat_client = VertexChatClient()
     app.state.vertex_rerank_client = VertexRerankClient()
     app.state.jetbrains_chat_client = JetBrainsChatClient()
+    app.state.conversation_state = get_default_conversation_state_cache()
     app.state.cost_accounting = build_async_cost_accounting(os.environ)
     _install_cost_clients(app)
     try:
@@ -977,6 +996,7 @@ async def lifespan(app: FastAPI):
         await app.state.vertex_client.close()
         await app.state.vertex_chat_client.close()
         await app.state.vertex_rerank_client.close()
+        await app.state.jetbrains_chat_client.close()
 
 
 app = FastAPI(title="AI Model Interop", version="0.1.0", lifespan=lifespan)
@@ -1166,6 +1186,25 @@ def _select_chat_client(request: Request, provider: str) -> Any:
     if provider in {"openai_compat", "openai_compatible"}:
         return request.app.state.openai_compatible_chat_client
     return request.app.state.vertex_chat_client
+
+
+def _validate_outgoing_messages(messages: list[dict[str, Any]], provider: str, cfg: dict[str, Any] | None, model: str) -> None:
+    from openai_compatible_bridge.core.images import validate_messages
+
+    cfg = cfg or {}
+    if provider == "jetbrains":
+        protocol = cfg.get("protocol") or infer_jetbrains_protocol(cfg.get("provider_model", model))
+    elif provider == "foundry":
+        protocol = cfg.get("protocol") or "openai_chat_completions"
+    elif provider == "vertex":
+        protocol = "openai_chat_completions" if cfg.get("api") == "openapiChatCompletions" else "google_generate_content"
+    elif provider in {"openai_compat", "openai_compatible"}:
+        protocol = "openai_chat_completions"
+    elif provider == "ollama":
+        protocol = "ollama_chat"
+    else:
+        protocol = "unsupported"
+    validate_messages(messages, provider, protocol)
 
 
 @app.get("/v1/models", response_model=None)
@@ -1630,6 +1669,11 @@ async def create_chat_completions(
             )
 
     provider = (_chat_cfg or {}).get("provider", "vertex")
+    try:
+        _validate_outgoing_messages([_normalize_chat_message(m) for m in payload.messages], provider, _chat_cfg, payload.model)
+    except VertexAPIError as exc:
+        return openai_error_response(message=exc.message, status_code=400, error_type="invalid_request_error", code=exc.code, param=exc.stage)
+
     if provider == "jetbrains" and payload.reasoning is not None:
         effort = payload.reasoning.get("effort")
         if set(payload.reasoning) != {"effort"} or not isinstance(effort, str):
@@ -1643,17 +1687,39 @@ async def create_chat_completions(
                 error_type="invalid_request_error", code="invalid_request", param="reasoning",
             )
         payload.reasoning_effort = effort
+    effective_reasoning_effort: Any = payload.reasoning_effort
+    if effective_reasoning_effort is None and payload.reasoning is not None:
+        if isinstance(payload.reasoning, dict) and "effort" in payload.reasoning:
+            effective_reasoning_effort = payload.reasoning.get("effort")
+            if effective_reasoning_effort is None:
+                effective_reasoning_effort = ""
+        else:
+            effective_reasoning_effort = ""
     if provider == "jetbrains":
+        protocol = (_chat_cfg or {}).get("protocol") or infer_jetbrains_protocol(
+            (_chat_cfg or {}).get("provider_model", payload.model)
+        )
         try:
+            validate_jetbrains_messages(protocol, [_normalize_chat_message(m) for m in payload.messages])
             validate_jetbrains_parameters(
-                (_chat_cfg or {}).get("protocol") or "openai_responses",
-                reasoning_effort=payload.reasoning_effort,
+                protocol,
+                reasoning_effort=effective_reasoning_effort,
                 parallel_tool_calls=payload.parallel_tool_calls,
                 response_format=payload.response_format,
             )
         except VertexAPIError as exc:
-            return openai_error_response(message=exc.message, status_code=exc.status_code,
-                                         error_type=map_vertex_status_to_openai_type(exc.status_code), code=exc.code)
+            param = exc.stage or (
+                ("reasoning_effort" if payload.reasoning_effort is not None else "reasoning")
+                if effective_reasoning_effort is not None
+                else None
+            )
+            return openai_error_response(
+                message=exc.message,
+                status_code=exc.status_code,
+                error_type=map_vertex_status_to_openai_type(exc.status_code),
+                code=exc.code,
+                param=param,
+            )
     if provider == "openai_compatible":
         provider = "openai_compat"
     provider_model = (_chat_cfg or {}).get("provider_model", payload.model)
@@ -1808,6 +1874,8 @@ def _anthropic_generate_kwargs(
         generate_kwargs["tools"] = params["tools"]
     if params["tool_choice"] is not None:
         generate_kwargs["tool_choice"] = params["tool_choice"]
+    if params.get("parallel_tool_calls") is not None:
+        generate_kwargs["parallel_tool_calls"] = params["parallel_tool_calls"]
     if provider in {"openai_compat", "openai_compatible", "jetbrains"} and params["reasoning_effort"] is not None:
         generate_kwargs["reasoning_effort"] = params["reasoning_effort"]
     if provider == "foundry":
@@ -2005,15 +2073,24 @@ async def create_anthropic_messages(
         provider_model = (cfg or {}).get("provider_model", params["model"])
 
     provider = (cfg or {}).get("provider", "vertex")
+    try:
+        _validate_outgoing_messages(params["messages"], provider, cfg, provider_model)
+    except VertexAPIError as exc:
+        return anthropic_error_response(message=exc.message, status_code=400, error_type="invalid_request_error")
     if provider == "jetbrains":
+        protocol = (cfg or {}).get("protocol") or infer_jetbrains_protocol(provider_model)
         try:
+            validate_jetbrains_messages(protocol, params["messages"])
             validate_jetbrains_parameters(
-                (cfg or {}).get("protocol") or "openai_responses",
+                protocol,
                 reasoning_effort=params["reasoning_effort"],
+                parallel_tool_calls=params.get("parallel_tool_calls"),
             )
         except VertexAPIError as exc:
             return anthropic_error_response(
-                message=exc.message, status_code=exc.status_code, error_type="invalid_request_error",
+                message=exc.message,
+                status_code=exc.status_code,
+                error_type=map_status_to_anthropic_error_type(exc.status_code),
             )
     if provider == "openai_compatible":
         provider = "openai_compat"
@@ -2100,6 +2177,300 @@ async def create_anthropic_messages(
             message=exc.message,
             status_code=exc.status_code,
             error_type=map_status_to_anthropic_error_type(exc.status_code),
+        )
+
+
+def _responses_generate_kwargs(
+    *,
+    params: dict[str, Any],
+    provider_model: str,
+    resolved_config: dict[str, Any] | None,
+    provider: str,
+) -> dict[str, Any]:
+    generate_kwargs: dict[str, Any] = {
+        "model": provider_model,
+        "messages": params["messages"],
+        "max_tokens": params["max_tokens"],
+        "temperature": params["temperature"],
+        "top_p": params["top_p"],
+        "stop": params["stop"],
+    }
+    if params.get("response_format") is not None:
+        generate_kwargs["response_format"] = params["response_format"]
+    if params.get("tools") is not None:
+        generate_kwargs["tools"] = params["tools"]
+    if params.get("tool_choice") is not None:
+        generate_kwargs["tool_choice"] = params["tool_choice"]
+    if params.get("parallel_tool_calls") is not None:
+        generate_kwargs["parallel_tool_calls"] = params["parallel_tool_calls"]
+    if provider in {"openai_compat", "openai_compatible", "jetbrains", "foundry"} and params.get("reasoning_effort") is not None:
+        generate_kwargs["reasoning_effort"] = params["reasoning_effort"]
+    if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"}:
+        generate_kwargs["resolved_config"] = resolved_config
+    return generate_kwargs
+
+
+def _responses_stream(
+    chat_client: Any,
+    params: dict[str, Any],
+    ctx: BudgetReservationContext,
+    provider_model: str,
+    resolved_config: dict[str, Any] | None,
+    provider: str,
+    state_cache: ConversationStateCache,
+) -> StreamingResponse:
+    """OpenAI Responses SSE로 변환하는 StreamingResponse를 만든다."""
+    response_id = new_response_id()
+    ctx.is_stream = True
+
+    async def event_generator():
+        state = ResponsesStreamState(
+            response_id=response_id,
+            model=params["model"],
+            custom_tool_names=params.get("custom_tool_names"),
+        )
+        accumulated_text_parts: list[str] = []
+        try:
+            async with ctx:
+                stream_kwargs = _responses_generate_kwargs(
+                    params=params,
+                    provider_model=provider_model,
+                    resolved_config=resolved_config,
+                    provider=provider,
+                )
+                if provider == "ollama":
+                    stream_kwargs.pop("tools", None)
+                    stream_kwargs.pop("tool_choice", None)
+                    stream_kwargs["reasoning_effort"] = params.get("reasoning_effort")
+                    stream_kwargs["reasoning"] = None
+                async for event in chat_client.stream_chat(**stream_kwargs):
+                    ctx.stream_saw_event = True
+                    delta_text = event.get("delta_text", "") or ""
+                    if delta_text:
+                        accumulated_text_parts.append(delta_text)
+                    usage = event.get("usage")
+                    if isinstance(usage, dict):
+                        ctx.actual_usage = _chat_usage_from_mapping(usage)
+                    for chunk in state.on_event(event):
+                        yield chunk
+        except (CostBudgetExceeded, CostConfigError, CostSubsystemUnhealthy) as exc:
+            error = _cost_tracking_error_response(exc)
+            try:
+                payload_err = json.loads(error.body.decode())
+                err_obj = payload_err.get("error", {})
+            except (ValueError, TypeError):
+                err_obj = {"message": str(exc), "type": "api_error"}
+            yield responses_sse_event(
+                "error",
+                {
+                    "error": {
+                        "type": "rate_limit_error" if isinstance(exc, CostBudgetExceeded) else "api_error",
+                        "message": err_obj.get("message", str(exc)),
+                        "code": err_obj.get("code"),
+                    }
+                },
+            )
+            return
+        except VertexAPIError as exc:
+            yield responses_sse_event(
+                "error",
+                {
+                    "error": {
+                        "type": map_vertex_status_to_openai_type(exc.status_code),
+                        "message": exc.message,
+                        "code": exc.code,
+                    }
+                },
+            )
+            return
+
+        prompt_tokens = sum(_estimate_text_tokens(m.get("content")) for m in params["messages"])
+        for chunk in state.finalize(
+            prompt_tokens=prompt_tokens,
+            completion_text="".join(accumulated_text_parts),
+        ):
+            yield chunk
+
+        state_cache.save_response(
+            response_id,
+            messages=[*params["messages"], state.assistant_turn_message()],
+            custom_tool_names=params.get("custom_tool_names") or set(),
+        )
+
+    return CostManagedStreamingResponse(
+        event_generator(),
+        cost_context=ctx,
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/v1/responses", response_model=None)
+async def create_responses(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
+) -> JSONResponse | StreamingResponse | dict[str, Any]:
+    """OpenAI Responses API ingress (POST /v1/responses) for Codex CLI and Responses clients."""
+    credential = None
+    if authorization and authorization.startswith("Bearer "):
+        credential = authorization[len("Bearer ") :]
+    elif x_api_key:
+        credential = x_api_key
+    if BRIDGE_API_KEY and credential != BRIDGE_API_KEY:
+        return openai_error_response(
+            message="Invalid wrapper API key.",
+            status_code=401,
+            error_type="authentication_error",
+            code="invalid_api_key",
+        )
+
+    try:
+        raw_payload = await request.json()
+    except Exception:
+        return openai_error_response(
+            message="Request body must be valid JSON.",
+            status_code=400,
+            error_type="invalid_request_error",
+            code="invalid_request",
+        )
+
+    state_cache = getattr(request.app.state, "conversation_state", None) or get_default_conversation_state_cache()
+    try:
+        params = parse_responses_chat_params(raw_payload, state_cache=state_cache)
+    except ResponsesBadRequest as exc:
+        return openai_error_response(
+            message=exc.message,
+            status_code=400,
+            error_type="invalid_request_error",
+            code=exc.code,
+            param=exc.param,
+        )
+
+    _chat_cfg, model_error = _resolve_chat_model(params["model"])
+    if model_error is not None:
+        return model_error
+
+    if params["response_format"] is not None:
+        rf_type = params["response_format"].get("type")
+        if rf_type not in SUPPORTED_RESPONSE_FORMAT_TYPES:
+            return openai_error_response(
+                message=f"Unsupported response_format.type: {rf_type!r}. "
+                        f"Allowed: {sorted(SUPPORTED_RESPONSE_FORMAT_TYPES)}",
+                status_code=400,
+                error_type="invalid_request_error",
+                code="invalid_request",
+                param="text.format",
+            )
+
+    provider = (_chat_cfg or {}).get("provider", "vertex")
+    provider_model = (_chat_cfg or {}).get("provider_model", params["model"])
+    try:
+        _validate_outgoing_messages(params["messages"], provider, _chat_cfg, provider_model)
+    except VertexAPIError as exc:
+        return openai_error_response(message=exc.message, status_code=400, error_type="invalid_request_error", code=exc.code, param=exc.stage)
+
+    if provider == "jetbrains":
+        protocol = (_chat_cfg or {}).get("protocol") or infer_jetbrains_protocol(provider_model)
+        try:
+            validate_jetbrains_messages(protocol, params["messages"])
+            validate_jetbrains_parameters(
+                protocol,
+                reasoning_effort=params["reasoning_effort"],
+                parallel_tool_calls=params["parallel_tool_calls"],
+                response_format=params["response_format"],
+            )
+        except VertexAPIError as exc:
+            return openai_error_response(
+                message=exc.message,
+                status_code=exc.status_code,
+                error_type=map_vertex_status_to_openai_type(exc.status_code),
+                code=exc.code,
+                param=exc.stage,
+            )
+
+    if params["tools"] is not None and not PROVIDER_TOOL_SUPPORT.get(provider, False):
+        return openai_error_response(
+            message=f"Tools are not supported for provider '{provider}'.",
+            status_code=400,
+            error_type="invalid_request_error",
+            code="unsupported_parameter",
+            param="tools",
+        )
+
+    if provider == "openai_compatible":
+        provider = "openai_compat"
+    chat_client = _select_chat_client(request, provider)
+    accounting = _cost_accounting(request) or DisabledCostAccounting()
+    forecast_usage = _anthropic_forecast_usage(params["messages"], params["max_tokens"] or 4096)
+
+    if params["stream"]:
+        ctx = accounting.reservation(
+            endpoint="chat",
+            model=params["model"],
+            forecast_usage=forecast_usage,
+            provider=provider,
+        )
+        preflight_error = _preflight_reservation_now(ctx)
+        if preflight_error is not None:
+            return preflight_error
+        return _responses_stream(
+            chat_client,
+            params,
+            ctx,
+            provider_model,
+            _chat_cfg if provider in {"vertex", "foundry", "openai_compat", "openai_compatible", "jetbrains"} else None,
+            provider,
+            state_cache,
+        )
+
+    try:
+        async with accounting.reservation(
+            endpoint="chat",
+            model=params["model"],
+            forecast_usage=forecast_usage,
+            provider=provider,
+        ) as ctx:
+            if provider == "ollama":
+                result = await chat_client.generate(
+                    model=provider_model,
+                    messages=params["messages"],
+                    max_tokens=params["max_tokens"],
+                    temperature=params["temperature"],
+                    top_p=params["top_p"],
+                    stop=params["stop"],
+                    response_format=params["response_format"],
+                    reasoning_effort=params["reasoning_effort"],
+                )
+            else:
+                generate_kwargs = _responses_generate_kwargs(
+                    params=params,
+                    provider_model=provider_model,
+                    resolved_config=_chat_cfg,
+                    provider=provider,
+                )
+                result = await chat_client.generate(**generate_kwargs)
+            ctx.complete(_chat_usage_from_mapping(result.get("usage", {})))
+
+            response_id = new_response_id()
+            state_cache.save_response(
+                response_id,
+                messages=[*params["messages"], build_assistant_history_message(result)],
+                custom_tool_names=params.get("custom_tool_names") or set(),
+            )
+            return openai_result_to_responses(
+                result,
+                model=params["model"],
+                response_id=response_id,
+                custom_tool_names=params.get("custom_tool_names"),
+            )
+    except (CostBudgetExceeded, CostConfigError, CostSubsystemUnhealthy) as exc:
+        return _cost_tracking_error_response(exc)
+    except VertexAPIError as exc:
+        return openai_error_response(
+            message=exc.message,
+            status_code=exc.status_code,
+            error_type=map_vertex_status_to_openai_type(exc.status_code),
+            code=exc.code,
         )
 
 
@@ -2225,6 +2596,7 @@ def _lifespan_with_factories(
             if jetbrains_chat_client_factory is not None
             else JetBrainsChatClient()
         )
+        app.state.conversation_state = get_default_conversation_state_cache()
         app.state.cost_accounting = cost_accounting_factory()
         _install_cost_clients(app)
         try:

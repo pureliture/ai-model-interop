@@ -13,6 +13,10 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
+from openai_compatible_bridge.core.conversation_state import (
+    ConversationStateCache,
+    get_default_conversation_state_cache,
+)
 from openai_compatible_bridge.core.cost_tracking import NormalizedUsage
 from openai_compatible_bridge.core.images import data_url, normalize_content
 from openai_compatible_bridge.providers.vertex import (
@@ -122,6 +126,44 @@ def _map_finish_reason(reason: Any) -> str | None:
 
 _XAI_SUPPORTED_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
+STANDARD_REASONING_EFFORTS: set[str] = {"low", "medium", "high", "xhigh", "max"}
+
+ANTHROPIC_THINKING_BUDGETS: dict[str, int] = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 16384,
+    "xhigh": 32768,
+    "max": 32768,
+}
+
+GOOGLE_THINKING_BUDGETS: dict[str, int] = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 16384,
+    "xhigh": 24576,
+    "max": 24576,
+}
+
+
+def _normalize_standard_reasoning_effort(effort: Any) -> str | None:
+    """Validate and normalize standard reasoning effort across providers."""
+    if effort is None:
+        return None
+    if not isinstance(effort, str):
+        raise VertexAPIError(
+            400,
+            f"Unsupported reasoning_effort: {effort!r}. Allowed: {sorted(STANDARD_REASONING_EFFORTS)}",
+            code="unsupported_parameter",
+        )
+    normalized = effort.strip().lower()
+    if normalized not in STANDARD_REASONING_EFFORTS:
+        raise VertexAPIError(
+            400,
+            f"Unsupported reasoning_effort: {effort!r}. Allowed: {sorted(STANDARD_REASONING_EFFORTS)}",
+            code="unsupported_parameter",
+        )
+    return normalized
+
 
 def _clamp_xai_reasoning_effort(effort: Any) -> str | None:
     """Map Hermes-style effort values onto Foundry xAI's accepted set.
@@ -220,15 +262,20 @@ def _xai_input_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     if block["type"] == "text":
                         parts.append({"type": "input_text", "text": block["text"]})
                     else:
-                        parts.append({"type": "input_image", "detail": "auto",
-                                      "image_url": data_url(block)})
+                        parts.append({"type": "input_image", "image_url": data_url(block)})
                 input_items.append({"role": role, "content": parts})
             else:
                 text = "".join(block["text"] for block in blocks if block["type"] == "text")
                 input_items.append({"role": role, "content": text})
         else:
-            text = _extract_message_text(content) if content is not None else ""
-            input_items.append({"role": role, "content": text})
+            blocks = normalize_content(content)
+            if any(block["type"] == "image" for block in blocks):
+                if role != "user":
+                    raise VertexAPIError(400, "Images require user role for Responses.", code="invalid_request_error", stage="messages")
+                parts = [{"type": "input_text", "text": b["text"]} if b["type"] == "text" else {"type": "input_image", "image_url": data_url(b)} for b in blocks]
+                input_items.append({"role": role, "content": parts})
+            else:
+                input_items.append({"role": role, "content": "".join(b["text"] for b in blocks)})
     return input_items
 
 
@@ -253,15 +300,30 @@ def _google_json_object(value: Any, *, string_key: str = "content") -> dict[str,
     return {string_key: value}
 
 
-def _google_function_call_part(tool_call: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _google_function_call_part(
+    tool_call: dict[str, Any],
+    *,
+    state_cache: ConversationStateCache | None = None,
+) -> tuple[dict[str, Any], str]:
     function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
     function = function if isinstance(function, dict) else {}
     name = str(function.get("name", ""))
     args = _google_json_object(function.get("arguments", "{}"), string_key="value")
-    native = tool_call.get("_google_part")
+    native = tool_call.get("_google_part") if isinstance(tool_call, dict) else None
     if isinstance(native, dict) and isinstance(native.get("functionCall"), dict):
         return native, name
+    call_id = str(tool_call.get("id") or "") if isinstance(tool_call, dict) else ""
     part: dict[str, Any] = {"functionCall": {"name": name, "args": args}}
+    if call_id:
+        cache = state_cache if state_cache is not None else get_default_conversation_state_cache()
+        cached_part = cache.get_google_call_part(call_id)
+        if isinstance(cached_part, dict) and isinstance(cached_part.get("functionCall"), dict):
+            restored_fc = {
+                **cached_part["functionCall"],
+                "name": name or str(cached_part["functionCall"].get("name", "")),
+                "args": args,
+            }
+            part = {**cached_part, "functionCall": restored_fc}
     extra = tool_call.get("extra_content") if isinstance(tool_call, dict) else None
     google = extra.get("google") if isinstance(extra, dict) else None
     signature = google.get("thought_signature") if isinstance(google, dict) else None
@@ -270,7 +332,11 @@ def _google_function_call_part(tool_call: dict[str, Any]) -> tuple[dict[str, Any
     return part, name
 
 
-def _google_contents_and_system(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+def _google_contents_and_system(
+    messages: list[dict[str, Any]],
+    *,
+    state_cache: ConversationStateCache | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Map OpenAI messages to Google GenerateContent contents/systemInstruction."""
     contents: list[dict[str, Any]] = []
     system_parts: list[dict[str, str]] = []
@@ -304,7 +370,7 @@ def _google_contents_and_system(messages: list[dict[str, Any]]) -> tuple[list[di
             if text:
                 parts.append({"text": text})
             for tool_call in message.get("tool_calls") or []:
-                part, name = _google_function_call_part(tool_call)
+                part, name = _google_function_call_part(tool_call, state_cache=state_cache)
                 parts.append(part)
                 call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
                 if call_id:
@@ -333,6 +399,8 @@ def _google_contents_and_system(messages: list[dict[str, Any]]) -> tuple[list[di
                 contents.append({"role": "user", "parts": [part]})
             continue
 
+        if role != "user":
+            raise VertexAPIError(400, f"Unsupported role {role!r} for Google GenerateContent.", code="invalid_request_error", stage="messages")
         blocks = normalize_content(content)
         parts: list[dict[str, Any]] = []
         for block in blocks:
@@ -387,8 +455,11 @@ def _google_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | 
         return None
     declarations: list[dict[str, Any]] = []
     for tool in tools:
-        function = tool.get("function", {}) if isinstance(tool, dict) else {}
-        function = function if isinstance(function, dict) else {}
+        function = (
+            tool.get("function")
+            if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+            else (tool if isinstance(tool, dict) else {})
+        )
         name = str(function.get("name", ""))
         if not name:
             continue
@@ -444,7 +515,11 @@ def _google_usage(usage: Any) -> dict[str, Any]:
 
 
 def _google_response_result(
-    payload: Any, *, used_call_ids: set[str] | None = None, max_tokens: int | None = None,
+    payload: Any,
+    *,
+    used_call_ids: set[str] | None = None,
+    max_tokens: int | None = None,
+    state_cache: ConversationStateCache | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise VertexAPIError(502, "Malformed Google response: expected object", code="bad_gateway")
@@ -461,6 +536,7 @@ def _google_response_result(
     # Use the same token-derived byte budget as the native stream collector.
     native_limit = max(65536, (max_tokens or 4096) * 64)
     used = set(used_call_ids or ())
+    cache = state_cache if state_cache is not None else get_default_conversation_state_cache()
     for part_index, part in enumerate(content.get("parts", []) or []):
         if not isinstance(part, dict) or part.get("thought") is True:
             continue
@@ -489,6 +565,7 @@ def _google_response_result(
                         code="context_compaction_native_limit", stage="collector_buffer",
                     )
                 native_parts[call_id] = part
+                cache.save_google_call_part(call_id, part)
             tool_call = {
                 "id": call_id,
                 "type": "function",

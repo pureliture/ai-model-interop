@@ -1074,6 +1074,9 @@ class BudgetReservationContext:
         self.accounting.finalize_estimated_only(self.current_reservation, estimated_reason)
 
     def _finalize_failed_exit(self, release_reason: str = "upstream_error") -> None:
+        if self.actual_usage is not None:
+            self._finalize_successful_exit()
+            return
         if self.is_stream and self.stream_saw_event:
             self.accounting.finalize_estimated_only(
                 self.current_reservation,

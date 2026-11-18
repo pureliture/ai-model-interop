@@ -1020,6 +1020,17 @@ def test_foundry_anthropic_multi_turn_history():
                     "tools": [WEATHER_TOOL, STOCK_TOOL],
                 },
             )
+            assert r2.status_code == 400
+            error = r2.json()["error"]
+            assert error["type"] == error["code"] == "invalid_request_error"
+            assert error["param"] == "messages[2].name"
+            assert "anthropic_messages" in error["message"]
+            assert len(captured_requests) == 1
+            retry = json.loads(r2.request.content)
+            for message in retry["messages"]:
+                if message.get("role") == "tool":
+                    message.pop("name", None)
+            r2 = http_client.post("/v1/chat/completions", json=retry)
             assert r2.status_code == 200
             d2 = r2.json()
             assert d2["choices"][0]["finish_reason"] == "stop"
@@ -1696,6 +1707,17 @@ def test_foundry_xai_multi_turn_history():
                     "tools": [WEATHER_TOOL, STOCK_TOOL],
                 },
             )
+            assert r2.status_code == 400
+            error = r2.json()["error"]
+            assert error["type"] == error["code"] == "invalid_request_error"
+            assert error["param"] == "messages[2].name"
+            assert "xai_responses" in error["message"]
+            assert len(captured_requests) == 1
+            retry = json.loads(r2.request.content)
+            for message in retry["messages"]:
+                if message.get("role") == "tool":
+                    message.pop("name", None)
+            r2 = http_client.post("/v1/chat/completions", json=retry)
             assert r2.status_code == 200
             d2 = r2.json()
             assert d2["choices"][0]["finish_reason"] == "stop"
@@ -2520,6 +2542,17 @@ def test_foundry_e2e_hermes_cycle_anthropic_non_stream():
                     "tools": [WEATHER_TOOL, STOCK_TOOL],
                 },
             )
+            assert r2.status_code == 400
+            error = r2.json()["error"]
+            assert error["type"] == error["code"] == "invalid_request_error"
+            assert error["param"] == "messages[2].name"
+            assert "anthropic_messages" in error["message"]
+            assert len(captured_requests) == 1
+            retry = json.loads(r2.request.content)
+            for message in retry["messages"]:
+                if message.get("role") == "tool":
+                    message.pop("name", None)
+            r2 = http_client.post("/v1/chat/completions", json=retry)
             assert r2.status_code == 200
             d2 = r2.json()
             assert d2["choices"][0]["finish_reason"] == "stop"
@@ -2620,6 +2653,19 @@ def test_foundry_e2e_hermes_cycle_anthropic_stream():
                     "tools": [WEATHER_TOOL],
                 },
             ) as r2:
+                assert r2.status_code == 400
+                r2.read()
+                error = r2.json()["error"]
+                assert error["type"] == error["code"] == "invalid_request_error"
+                assert error["param"] == "messages[2].name"
+                assert "anthropic_messages" in error["message"]
+                assert call_count == 1
+                retry = json.loads(r2.request.content)
+            for message in retry["messages"]:
+                if message.get("role") == "tool":
+                    message.pop("name", None)
+            with http_client.stream("POST", "/v1/chat/completions", json=retry) as r2:
+                assert r2.status_code == 200
                 lines2 = list(r2.iter_lines())
 
             ev2 = [json.loads(l[6:]) for l in lines2 if l.startswith("data: ") and l.strip() != "data: [DONE]"]
@@ -2731,6 +2777,17 @@ def test_foundry_e2e_hermes_cycle_xai_non_stream():
                     "tools": [WEATHER_TOOL, STOCK_TOOL],
                 },
             )
+            assert r2.status_code == 400
+            error = r2.json()["error"]
+            assert error["type"] == error["code"] == "invalid_request_error"
+            assert error["param"] == "messages[2].name"
+            assert "xai_responses" in error["message"]
+            assert len(captured_requests) == 1
+            retry = json.loads(r2.request.content)
+            for message in retry["messages"]:
+                if message.get("role") == "tool":
+                    message.pop("name", None)
+            r2 = http_client.post("/v1/chat/completions", json=retry)
             assert r2.status_code == 200
             d2 = r2.json()
             assert d2["choices"][0]["finish_reason"] == "stop"
@@ -2826,6 +2883,19 @@ def test_foundry_e2e_hermes_cycle_xai_stream():
                     "tools": [WEATHER_TOOL],
                 },
             ) as r2:
+                assert r2.status_code == 400
+                r2.read()
+                error = r2.json()["error"]
+                assert error["type"] == error["code"] == "invalid_request_error"
+                assert error["param"] == "messages[2].name"
+                assert "xai_responses" in error["message"]
+                assert call_count == 1
+                retry = json.loads(r2.request.content)
+            for message in retry["messages"]:
+                if message.get("role") == "tool":
+                    message.pop("name", None)
+            with http_client.stream("POST", "/v1/chat/completions", json=retry) as r2:
+                assert r2.status_code == 200
                 lines2 = list(r2.iter_lines())
 
             ev2 = [json.loads(l[6:]) for l in lines2 if l.startswith("data: ") and l.strip() != "data: [DONE]"]
