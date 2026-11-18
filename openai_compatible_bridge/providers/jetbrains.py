@@ -111,10 +111,16 @@ def _grazie_headers(
         "X-Keep-Path": "true",
         "X-Accept-EAP-License": "false",
     }
-    if effective_auth_mode in {"jwt", "grazie-jwt", "grazie_authenticate_jwt", "personal"}:
+    if effective_auth_mode in {"bearer", "authorization", ""}:
+        headers["Authorization"] = f"Bearer {token}"
+    elif effective_auth_mode in {"jwt", "grazie-jwt", "grazie_authenticate_jwt", "personal"}:
         headers["Grazie-Authenticate-JWT"] = token
     else:
-        headers["Authorization"] = f"Bearer {token}"
+        raise VertexAPIError(
+            503,
+            f"Unsupported JETBRAINS_AI_AUTH_MODE: {effective_auth_mode!r}.",
+            code="provider_config_error",
+        )
     if llm_model == "google":
         headers["X-Free-Google-Api"] = "true"
     if llm_model == "anthropic":

@@ -39,6 +39,20 @@ def responses_sse_event(event_type: str, payload: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
 
 
+def _text_value(text: Any, *, index: int) -> str:
+    if isinstance(text, str):
+        return text
+    if text is None:
+        return ""
+    try:
+        return json.dumps(text, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raise ResponsesBadRequest(
+            f"Message content block[{index}] has a text value that cannot be represented.",
+            param="input",
+        )
+
+
 def _extract_responses_content_text(content: Any) -> str:
     if content is None:
         return ""
@@ -57,9 +71,7 @@ def _extract_responses_content_text(content: Any) -> str:
                 )
             block_type = block.get("type")
             if block_type in ("input_text", "output_text", "text", None):
-                text = block.get("text", "")
-                if isinstance(text, str):
-                    parts.append(text)
+                parts.append(_text_value(block.get("text", ""), index=index))
             elif block_type in ("reasoning", "thinking", "redacted_thinking", "summary_text"):
                 continue
             else:
@@ -69,10 +81,10 @@ def _extract_responses_content_text(content: Any) -> str:
                 )
         return "".join(parts)
     if isinstance(content, dict):
-        if "text" in content and isinstance(content["text"], str):
-            return content["text"]
+        if "text" in content:
+            return _text_value(content["text"], index=0)
         return json.dumps(content, ensure_ascii=False)
-    return str(content)
+    return _text_value(content, index=0)
 
 
 def _extract_tool_output_text(output: Any) -> str:
@@ -98,14 +110,24 @@ def _extract_tool_output_text(output: Any) -> str:
     return str(output)
 
 
-def extract_custom_tool_input(raw_arguments: Any) -> str:
+def _stringify_input_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_custom_tool_input(raw_arguments: Any) -> str | None:
     """Extract raw freeform string input from a wrapped custom tool JSON arguments payload."""
     if raw_arguments is None:
-        return ""
+        return None
     if isinstance(raw_arguments, dict):
         if "input" in raw_arguments:
-            val = raw_arguments.get("input")
-            return "" if val is None else str(val)
+            return _stringify_input_value(raw_arguments.get("input"))
         return json.dumps(raw_arguments, ensure_ascii=False)
     if isinstance(raw_arguments, str):
         stripped = raw_arguments.strip()
@@ -116,18 +138,19 @@ def extract_custom_tool_input(raw_arguments: Any) -> str:
         except (TypeError, ValueError):
             return raw_arguments
         if isinstance(parsed, dict) and "input" in parsed:
-            val = parsed.get("input")
-            return "" if val is None else str(val)
+            return _stringify_input_value(parsed.get("input"))
         if isinstance(parsed, str):
             return parsed
-        return raw_arguments
-    return str(raw_arguments)
+        return json.dumps(parsed, ensure_ascii=False)
+    stringified = _stringify_input_value(raw_arguments)
+    return raw_arguments if stringified is None else stringified
 
 
 def responses_input_to_messages(
     input_value: Any,
     *,
     instructions: str | None = None,
+    state_cache: ConversationStateCache | None = None,
 ) -> tuple[list[dict[str, Any]], set[str]]:
     """Normalize Responses `instructions` and `input` into internal OpenAI-shape messages."""
     messages: list[dict[str, Any]] = []
@@ -162,7 +185,29 @@ def responses_input_to_messages(
         item_type = item.get("type")
         role = item.get("role")
 
-        if item_type in ("reasoning", "item_reference"):
+        if item_type == "item_reference":
+            ref_id = item.get("id")
+            if not isinstance(ref_id, str) or not ref_id.strip():
+                raise ResponsesBadRequest(
+                    f"input[{index}] (item_reference) requires a non-empty id.",
+                    param="input",
+                )
+            if state_cache is None:
+                raise ResponsesBadRequest(
+                    f"input[{index}] (item_reference) cannot be resolved without a conversation state cache.",
+                    param="input",
+                )
+            resolved = state_cache.get_response(ref_id.strip())
+            if not isinstance(resolved, dict) or not isinstance(resolved.get("messages"), list):
+                raise ResponsesBadRequest(
+                    f"input[{index}] references unknown response '{ref_id.strip()}'.",
+                    param="input",
+                )
+            saw_conversation_turn = True
+            messages.extend(resolved["messages"])
+            continue
+
+        if item_type == "reasoning":
             continue
 
         if item_type in ("function_call", "custom_tool_call"):
@@ -187,10 +232,14 @@ def responses_input_to_messages(
                 raw_args = item.get("arguments", "{}")
                 if isinstance(raw_args, str):
                     args_str = raw_args if raw_args.strip() else "{}"
-                elif isinstance(raw_args, dict):
-                    args_str = json.dumps(raw_args, ensure_ascii=False)
                 else:
-                    args_str = "{}"
+                    try:
+                        args_str = json.dumps(raw_args, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        raise ResponsesBadRequest(
+                            f"input[{index}] (function_call) has arguments that cannot be represented as JSON.",
+                            param="input",
+                        )
             tc_entry = {
                 "id": call_id,
                 "type": "function",
@@ -226,7 +275,7 @@ def responses_input_to_messages(
             messages.append(tool_msg)
             continue
 
-        if item_type in (None, "message") or role in ("user", "assistant", "system", "developer"):
+        if item_type in (None, "message"):
             effective_role = str(role or "user")
             if effective_role not in ("user", "assistant", "system", "developer"):
                 raise ResponsesBadRequest(
@@ -434,6 +483,7 @@ def parse_responses_chat_params(
     messages, input_custom_tools = responses_input_to_messages(
         raw_input,
         instructions=payload.get("instructions"),
+        state_cache=state_cache,
     )
 
     if prior_messages:
@@ -551,6 +601,66 @@ def build_assistant_history_message(result: dict[str, Any]) -> dict[str, Any]:
     return msg
 
 
+def _coerce_usage_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _clean_detail_map(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    detail: dict[str, int] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        parsed = _coerce_usage_int(value)
+        if parsed is not None:
+            detail[key] = parsed
+    return detail
+
+
+def _responses_usage_object(usage_raw: Any) -> dict[str, Any]:
+    usage = usage_raw if isinstance(usage_raw, dict) else {}
+    input_tokens = _coerce_usage_int(usage.get("input_tokens"))
+    if input_tokens is None:
+        input_tokens = _coerce_usage_int(usage.get("prompt_tokens")) or 0
+    output_tokens = _coerce_usage_int(usage.get("output_tokens"))
+    if output_tokens is None:
+        output_tokens = _coerce_usage_int(usage.get("completion_tokens")) or 0
+    total_tokens = _coerce_usage_int(usage.get("total_tokens"))
+    if total_tokens is None:
+        total_tokens = input_tokens + output_tokens
+    usage_obj: dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+    input_details = _clean_detail_map(usage.get("input_tokens_details"))
+    if not input_details:
+        input_details = _clean_detail_map(usage.get("prompt_tokens_details"))
+    if input_details:
+        usage_obj["input_tokens_details"] = input_details
+    output_details = _clean_detail_map(usage.get("output_tokens_details"))
+    if not output_details:
+        output_details = _clean_detail_map(usage.get("completion_tokens_details"))
+    if output_details:
+        usage_obj["output_tokens_details"] = output_details
+    return usage_obj
+
+
+def _responses_status(finish_reason: str | None) -> tuple[str, dict[str, str] | None]:
+    if finish_reason == "length":
+        return "incomplete", {"reason": "max_output_tokens"}
+    if finish_reason == "content_filter":
+        return "incomplete", {"reason": "content_filter"}
+    return "completed", None
+
+
 def openai_result_to_responses(
     result: dict[str, Any],
     *,
@@ -585,7 +695,7 @@ def openai_result_to_responses(
 
     for index, call in enumerate(tool_calls):
         if not isinstance(call, dict):
-            continue
+            call = {"id": None, "function": {"name": "", "arguments": call}}
         fn = call.get("function") if isinstance(call.get("function"), dict) else {}
         name = str(fn.get("name") or "")
         call_id = str(call.get("id") or f"call_{name or 'tool'}_{index}")
@@ -602,7 +712,16 @@ def openai_result_to_responses(
                 }
             )
         else:
-            args_str = raw_args if isinstance(raw_args, str) else json.dumps(raw_args, ensure_ascii=False)
+            if isinstance(raw_args, str):
+                args_str = raw_args
+            else:
+                try:
+                    args_str = json.dumps(raw_args, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    raise ResponsesBadRequest(
+                        "Upstream tool call arguments cannot be represented as JSON.",
+                        param="output",
+                    )
             output_items.append(
                 {
                     "id": f"fc_{uuid.uuid4().hex[:24]}",
@@ -614,12 +733,8 @@ def openai_result_to_responses(
                 }
             )
 
-    usage_raw = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-    input_tokens = int(usage_raw.get("prompt_tokens", 0) or 0)
-    output_tokens = int(usage_raw.get("completion_tokens", 0) or 0)
-    total_tokens = int(usage_raw.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
-
-    status = "incomplete" if finish_reason == "length" else "completed"
+    usage_obj = _responses_usage_object(result.get("usage"))
+    status, incomplete_details = _responses_status(finish_reason if isinstance(finish_reason, str) else "stop")
     response_obj: dict[str, Any] = {
         "id": rid,
         "object": "response",
@@ -628,14 +743,10 @@ def openai_result_to_responses(
         "model": model,
         "output": output_items,
         "output_text": str(text or ""),
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
-        },
+        "usage": usage_obj,
     }
-    if status == "incomplete":
-        response_obj["incomplete_details"] = {"reason": "max_output_tokens"}
+    if incomplete_details is not None:
+        response_obj["incomplete_details"] = incomplete_details
     return response_obj
 
 
@@ -663,7 +774,14 @@ class ResponsesStreamState:
         self.usage: dict[str, Any] | None = None
         self.completed_items: list[dict[str, Any]] = []
 
-    def _base_response(self, *, status: str, output: list[dict[str, Any]], usage: dict[str, int] | None = None) -> dict[str, Any]:
+    def _base_response(
+        self,
+        *,
+        status: str,
+        output: list[dict[str, Any]],
+        usage: dict[str, Any] | None = None,
+        incomplete_details: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         obj: dict[str, Any] = {
             "id": self.response_id,
             "object": "response",
@@ -675,7 +793,7 @@ class ResponsesStreamState:
         if usage is not None:
             obj["usage"] = usage
         if status == "incomplete":
-            obj["incomplete_details"] = {"reason": "max_output_tokens"}
+            obj["incomplete_details"] = dict(incomplete_details) if incomplete_details else {"reason": "max_output_tokens"}
         return obj
 
     def _ensure_start(self) -> list[str]:
@@ -763,10 +881,20 @@ class ResponsesStreamState:
 
     def on_event(self, event: dict[str, Any]) -> list[str]:
         out = self._ensure_start()
-        delta_text = event.get("delta_text", "") or ""
+        delta_text = event.get("delta_text", "")
+        if delta_text is None:
+            delta_text = ""
+        if not isinstance(delta_text, str):
+            try:
+                delta_text = json.dumps(delta_text, ensure_ascii=False)
+            except (TypeError, ValueError):
+                raise ResponsesBadRequest(
+                    "Upstream stream text delta cannot be represented as JSON.",
+                    param="output",
+                )
         if delta_text:
             out.extend(self._ensure_message_open())
-            self.text_parts.append(str(delta_text))
+            self.text_parts.append(delta_text)
             out.append(
                 responses_sse_event(
                     "response.output_text.delta",
@@ -774,14 +902,14 @@ class ResponsesStreamState:
                         "item_id": self.msg_item_id,
                         "output_index": self.msg_output_index,
                         "content_index": 0,
-                        "delta": str(delta_text),
+                        "delta": delta_text,
                     },
                 )
             )
 
         for position, call in enumerate(event.get("delta_tool_calls") or []):
             if not isinstance(call, dict):
-                continue
+                call = {"index": position, "function": {"arguments": call}}
             key = call.get("index", position)
             try:
                 key = int(key)
@@ -796,6 +924,14 @@ class ResponsesStreamState:
             args = fn.get("arguments", "")
             if isinstance(args, str):
                 buf["arguments"] += args
+            elif args is not None:
+                try:
+                    buf["arguments"] += json.dumps(args, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    raise ResponsesBadRequest(
+                        "Upstream stream tool call arguments cannot be represented as JSON.",
+                        param="output",
+                    )
 
         if event.get("finish_reason") is not None:
             self.finish_reason = event["finish_reason"]
@@ -929,25 +1065,28 @@ class ResponsesStreamState:
                 )
 
         if isinstance(self.usage, dict):
-            input_tokens = int(self.usage.get("prompt_tokens", 0) or 0)
-            output_tokens = int(self.usage.get("completion_tokens", 0) or 0)
-            total_tokens = int(self.usage.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
+            usage_obj = _responses_usage_object(self.usage)
         else:
             input_tokens = prompt_tokens
             text_for_est = completion_text or "".join(self.text_parts)
             output_tokens = max(0, (len(text_for_est) + 3) // 4) if text_for_est else 0
-            total_tokens = input_tokens + output_tokens
-
-        usage_obj = {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
-        }
-        status = "incomplete" if self.finish_reason == "length" else "completed"
+            usage_obj = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            }
+        status, incomplete_details = _responses_status(self.finish_reason if isinstance(self.finish_reason, str) else "stop")
         out.append(
             responses_sse_event(
                 "response.completed",
-                {"response": self._base_response(status=status, output=self.completed_items, usage=usage_obj)},
+                {
+                    "response": self._base_response(
+                        status=status,
+                        output=self.completed_items,
+                        usage=usage_obj,
+                        incomplete_details=incomplete_details,
+                    )
+                },
             )
         )
         return out
