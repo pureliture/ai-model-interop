@@ -1093,7 +1093,12 @@ class VertexChatClient:
                     {"role": "user", "parts": [{"functionResponse": {"name": name, "response": response_obj}}]}
                 )
             else:
-                contents.append({"role": "user", "parts": [{"text": text}]})
+                from openai_compatible_bridge.core.images import normalize_content
+                blocks = normalize_content(raw_content)
+                parts = [{"text": b["text"]} if b["type"] == "text" else
+                         {"inlineData": {"mimeType": b["mime_type"], "data": b["data"]}}
+                         for b in blocks]
+                contents.append({"role": "user", "parts": parts or [{"text": ""}]})
 
         body: dict[str, Any] = {"contents": contents}
 

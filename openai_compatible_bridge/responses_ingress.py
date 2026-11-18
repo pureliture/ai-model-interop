@@ -241,8 +241,33 @@ def responses_input_to_messages(
                     param=f"input[{index}].{field}",
                 )
             content = item.get("content")
-            if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "input_image" for b in content):
-                content = [({"type": "image_url", "image_url": {"url": b.get("image_url"), **({"detail": b["detail"]} if "detail" in b else {})}, **({"file_id": b["file_id"]} if "file_id" in b else {})} if isinstance(b, dict) and b.get("type") == "input_image" else {"type": "text", "text": b.get("text", "")} if isinstance(b, dict) and b.get("type") == "input_text" else b) for b in content]
+            if isinstance(content, list):
+                mapped = []
+                has_image = False
+                for block_index, block in enumerate(content):
+                    if isinstance(block, dict) and block.get("type") == "input_image":
+                        path = f"input[{index}].content[{block_index}]"
+                        extra = block.keys() - {"type", "image_url", "detail", "file_id"}
+                        if extra:
+                            field = sorted(extra)[0]
+                            raise ResponsesBadRequest(f"{path}.{field} cannot be represented in chat protocol.", param=f"{path}.{field}")
+                        image = {"type": "image_url", "image_url": {"url": block.get("image_url")}}
+                        if "detail" in block:
+                            image["image_url"]["detail"] = block["detail"]
+                        if "file_id" in block:
+                            image["file_id"] = block["file_id"]
+                        mapped.append(image)
+                        has_image = True
+                    elif isinstance(block, dict) and block.get("type") in {"input_text", "output_text", "text"}:
+                        extra = block.keys() - {"type", "text"}
+                        if extra:
+                            field = sorted(extra)[0]
+                            path = f"input[{index}].content[{block_index}].{field}"
+                            raise ResponsesBadRequest(f"{path} cannot be represented in chat protocol.", param=path)
+                        mapped.append({"type": "text", "text": block.get("text", "")})
+                    else:
+                        mapped.append(block)
+                content = mapped if has_image else _extract_responses_content_text(content)
             else:
                 content = _extract_responses_content_text(content)
             saw_conversation_turn = True

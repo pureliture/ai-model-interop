@@ -136,6 +136,10 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
         content = message.get("content")
 
         if role == "system":
+            if isinstance(content, list):
+                for block_index, block in enumerate(content):
+                    if not isinstance(block, dict) or block.get("type") != "text" or set(block) - {"type", "text"}:
+                        raise AnthropicBadRequest(f"messages[{index}].content[{block_index}] cannot be represented in chat protocol.")
             text = _extract_text(content)
             openai_messages.append({"role": "system", "content": text})
             continue
@@ -147,14 +151,38 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
             raise AnthropicBadRequest(f"messages[{index}].content must be a string or an array.")
 
         text_parts: list[str] = []
+        user_blocks: list[dict[str, Any]] = []
+        has_images = False
         tool_calls: list[dict[str, Any]] = []
         tool_messages: list[dict[str, Any]] = []
-        for block in content:
+        for block_index, block in enumerate(content):
             if not isinstance(block, dict):
                 raise AnthropicBadRequest(f"messages[{index}] content blocks must be objects.")
             block_type = block.get("type")
             if block_type == "text":
+                extra = block.keys() - {"type", "text"}
+                if extra:
+                    raise AnthropicBadRequest(f"messages[{index}].content[{block_index}].{sorted(extra)[0]} cannot be represented in chat protocol.")
                 text_parts.append(str(block.get("text", "")))
+                user_blocks.append({"type": "text", "text": str(block.get("text", ""))})
+            elif block_type == "image":
+                path = f"messages[{index}].content[{block_index}]"
+                if role != "user":
+                    raise AnthropicBadRequest(f"{path}: image requires user role for chat protocol.")
+                extra = block.keys() - {"type", "source"}
+                if extra:
+                    raise AnthropicBadRequest(f"{path}.{sorted(extra)[0]} cannot be represented in chat protocol.")
+                source = block.get("source")
+                if not isinstance(source, dict) or source.get("type") != "base64":
+                    raise AnthropicBadRequest(f"{path}.source: only base64 is supported for chat protocol.")
+                extra = source.keys() - {"type", "media_type", "data"}
+                if extra:
+                    raise AnthropicBadRequest(f"{path}.source.{sorted(extra)[0]} cannot be represented in chat protocol.")
+                media_type, data = source.get("media_type"), source.get("data")
+                if not isinstance(media_type, str) or not isinstance(data, str):
+                    raise AnthropicBadRequest(f"{path}.source requires media_type and data for chat protocol.")
+                user_blocks.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}})
+                has_images = True
             elif block_type == "thinking" or block_type == "redacted_thinking":
                 continue
             elif block_type == "tool_use":
@@ -202,7 +230,11 @@ def anthropic_messages_to_openai(messages: Any) -> list[dict[str, Any]]:
             openai_messages.append(entry)
         else:
             text = "".join(text_parts)
-            if text or not tool_messages:
+            if has_images and tool_messages:
+                raise AnthropicBadRequest(f"messages[{index}].content: mixed image and tool result cannot be represented in chat protocol.")
+            if has_images:
+                openai_messages.append({"role": "user", "content": user_blocks})
+            elif text or not tool_messages:
                 openai_messages.append({"role": "user", "content": text})
             openai_messages.extend(tool_messages)
 

@@ -1114,6 +1114,25 @@ def _select_chat_client(request: Request, provider: str) -> Any:
     return request.app.state.vertex_chat_client
 
 
+def _validate_outgoing_messages(messages: list[dict[str, Any]], provider: str, cfg: dict[str, Any] | None, model: str) -> None:
+    from openai_compatible_bridge.core.images import validate_messages
+
+    cfg = cfg or {}
+    if provider == "jetbrains":
+        protocol = cfg.get("protocol") or infer_jetbrains_protocol(cfg.get("provider_model", model))
+    elif provider == "foundry":
+        protocol = cfg.get("protocol") or "openai_chat_completions"
+    elif provider == "vertex":
+        protocol = "openai_chat_completions" if cfg.get("api") == "openapiChatCompletions" else "google_generate_content"
+    elif provider in {"openai_compat", "openai_compatible"}:
+        protocol = "openai_chat_completions"
+    elif provider == "ollama":
+        protocol = "ollama_chat"
+    else:
+        protocol = "unsupported"
+    validate_messages(messages, provider, protocol)
+
+
 @app.get("/v1/models", response_model=None)
 async def list_models(authorization: str | None = Header(default=None)) -> JSONResponse | dict[str, Any]:
     if BRIDGE_API_KEY and authorization != f"Bearer {BRIDGE_API_KEY}":
@@ -1570,6 +1589,10 @@ async def create_chat_completions(
             )
 
     provider = (_chat_cfg or {}).get("provider", "vertex")
+    try:
+        _validate_outgoing_messages([_normalize_chat_message(m) for m in payload.messages], provider, _chat_cfg, payload.model)
+    except VertexAPIError as exc:
+        return openai_error_response(message=exc.message, status_code=400, error_type="invalid_request_error", code=exc.code, param=exc.stage)
     effective_reasoning_effort: Any = payload.reasoning_effort
     if effective_reasoning_effort is None and payload.reasoning is not None:
         if isinstance(payload.reasoning, dict) and "effort" in payload.reasoning:
@@ -1949,6 +1972,10 @@ async def create_anthropic_messages(
         provider_model = (cfg or {}).get("provider_model", params["model"])
 
     provider = (cfg or {}).get("provider", "vertex")
+    try:
+        _validate_outgoing_messages(params["messages"], provider, cfg, provider_model)
+    except VertexAPIError as exc:
+        return anthropic_error_response(message=exc.message, status_code=400, error_type="invalid_request_error")
     if provider == "jetbrains":
         protocol = (cfg or {}).get("protocol") or infer_jetbrains_protocol(provider_model)
         try:
@@ -2236,6 +2263,10 @@ async def create_responses(
 
     provider = (_chat_cfg or {}).get("provider", "vertex")
     provider_model = (_chat_cfg or {}).get("provider_model", params["model"])
+    try:
+        _validate_outgoing_messages(params["messages"], provider, _chat_cfg, provider_model)
+    except VertexAPIError as exc:
+        return openai_error_response(message=exc.message, status_code=400, error_type="invalid_request_error", code=exc.code, param=exc.stage)
 
     if provider == "jetbrains":
         protocol = (_chat_cfg or {}).get("protocol") or infer_jetbrains_protocol(provider_model)

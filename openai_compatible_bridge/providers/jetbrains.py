@@ -152,53 +152,9 @@ JETBRAINS_MESSAGE_ROLES = {
 
 
 def validate_jetbrains_messages(protocol: str, messages: list[dict[str, Any]]) -> None:
-    from openai_compatible_bridge.core.images import normalize_content
+    from openai_compatible_bridge.core.images import validate_messages
 
-    def reject(path: str, reason: str) -> None:
-        raise VertexAPIError(400, f"{path}: {reason} for JetBrains {protocol}.",
-                             code="invalid_request_error", stage=path)
-
-    roles = JETBRAINS_MESSAGE_ROLES.get(protocol, set())
-    for index, message in enumerate(messages):
-        path = f"messages[{index}]"
-        role = message.get("role")
-        if role not in roles:
-            reject(f"{path}.role", f"Unsupported role {role!r}")
-        allowed = {"role", "content"}
-        if role == "assistant":
-            allowed.add("tool_calls")
-        if role == "tool":
-            allowed.add("tool_call_id")
-            if protocol == JETBRAINS_ANTHROPIC_PROTOCOL:
-                allowed.add("is_error")
-            if not message.get("tool_call_id"):
-                reject(f"{path}.tool_call_id", "A tool result requires a connection ID")
-        for field in message.keys() - allowed:
-            reject(f"{path}.{field}", "Field cannot be represented")
-        content = message.get("content")
-        if isinstance(content, list):
-            for i, block in enumerate(content):
-                if not isinstance(block, dict):
-                    reject(f"{path}.content[{i}]", "Unsupported content block")
-                kind = block.get("type")
-                if kind in {"image_url", "input_image"}:
-                    ipath = f"{path}.content[{i}]"
-                    if "file_id" in block:
-                        reject(f"{ipath}.file_id", "Image file ID cannot be represented")
-                    image = block.get("image_url")
-                    detail = image.get("detail") if isinstance(image, dict) else block.get("detail")
-                    if detail is not None:
-                        reject(f"{ipath}.detail", "Image detail cannot be represented")
-                    try:
-                        normalize_content([block])
-                    except VertexAPIError as exc:
-                        reject(f"{ipath}.image_url", exc.message)
-                    # Gateway image support has not been verified by canary.
-                    reject(ipath, "Image support is unverified")
-                if kind not in {"text", "input_text"} or set(block) - {"type", "text"}:
-                    reject(f"{path}.content[{i}]", "Content block cannot be represented")
-        elif content is not None and not isinstance(content, str):
-            reject(f"{path}.content", "Content cannot be represented")
+    validate_messages(messages, "jetbrains", protocol)
 
 
 class JetBrainsChatClient:
@@ -459,7 +415,8 @@ class JetBrainsChatClient:
                     result_block["is_error"] = True
                 _append_anthropic_turn(chat_messages, "user", [result_block])
             else:
-                _append_anthropic_turn(chat_messages, "user", content if content is not None else "")
+                from openai_compatible_bridge.core.images import anthropic_image_content
+                _append_anthropic_turn(chat_messages, "user", anthropic_image_content(content))
 
         if not chat_messages:
             chat_messages.append({"role": "user", "content": ""})
