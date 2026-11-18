@@ -177,6 +177,16 @@ def test_codex_to_claude_apply_patch_custom_tool_and_previous_response_id() -> N
                     "parallel_tool_calls": False,
                 },
             )
+            assert turn1.status_code == 400
+            error = turn1.json()["error"]
+            assert error["type"] == error["code"] == "invalid_request_error"
+            assert error["param"] == "messages[1].role"
+            assert "developer" in error["message"]
+            assert "anthropic_messages" in error["message"]
+            assert not captured_bodies
+            retry = json.loads(turn1.request.content)
+            retry["input"] = [item for item in retry["input"] if item.get("role") != "developer"]
+            turn1 = client.post("/v1/responses", json=retry)
             assert turn1.status_code == 200, turn1.text
             t1_data = turn1.json()
             resp_id_1 = t1_data["id"]
@@ -189,11 +199,10 @@ def test_codex_to_claude_apply_patch_custom_tool_and_previous_response_id() -> N
                 "input": patch_payload,
             }
 
-            # Verify upstream Anthropic request merged consecutive user/developer turns and mapped parallel_tool_calls=False
+            # Verify the representable retry still maps tools and parallel_tool_calls=False.
             assert len(captured_bodies[0]["messages"]) == 1
             assert captured_bodies[0]["messages"][0]["role"] == "user"
             assert "Fix src/user.py" in captured_bodies[0]["messages"][0]["content"]
-            assert "Permissions: workspace-write" in captured_bodies[0]["messages"][0]["content"]
             assert captured_bodies[0]["tools"][0]["name"] == "apply_patch"
             assert captured_bodies[0]["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
 
