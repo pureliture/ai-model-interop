@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import Any
 import httpx
@@ -20,6 +21,20 @@ ANTHROPIC = "anthropic_messages"
 XAI_RESPONSES = "xai_responses"
 OPENAI_RESPONSES = "openai_responses"
 GOOGLE = "google_generate_content"
+
+_STREAM_SECRET_RE = re.compile(
+    r"(?i)(bearer\s+[^\s,;]+"
+    r"|(?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|password|secret)\s*[=:]\s*[^\s,;]+"
+    r"|://[^\s/@]+:[^\s/@]+@)"
+)
+
+
+def _stream_error_detail(exc: BaseException) -> str:
+    """Return a short redacted cause; never put credentials into a client error."""
+    kind = type(exc).__name__
+    text = " ".join(_STREAM_SECRET_RE.sub("[redacted]", str(exc)).split())[:200]
+    return f"{kind}: {text}" if text else kind
+
 
 class ProtocolStream:
     """Protocol conversion over provider-supplied URL, headers and error mapping."""
@@ -522,7 +537,7 @@ class ProtocolStream:
                 except httpx.RequestError as exc:
                     if private_stream:
                         raise VertexAPIError(
-                            502, f"{provider_label} response stream read failed.", code="connection_error", stage="provider_read",
+                            502, f"{provider_label} response stream read failed ({_stream_error_detail(exc)}).", code="connection_error", stage="provider_read",
                         ) from exc
                     raise
 
