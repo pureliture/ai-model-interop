@@ -99,6 +99,14 @@ def test_parse_responses_instructions_developer_and_history_items() -> None:
                 "function": {"name": "shell", "arguments": '{"command":["ls"]}'},
             }
         ],
+        "thinking_blocks": [
+            {
+                "type": "reasoning_item",
+                "id": "rs_123",
+                "encrypted_content": "enc_xyz",
+                "summary": [{"type": "summary_text", "text": "thinking..."}],
+            }
+        ],
     }
     assert messages[4] == {
         "role": "tool",
@@ -348,3 +356,58 @@ def test_responses_stream_state_text_function_and_custom_tool_events() -> None:
     assert history_msg["role"] == "assistant"
     assert history_msg["content"] == "Hello world!"
     assert len(history_msg["tool_calls"]) == 2
+
+
+def test_reasoning_items_precede_message_in_responses_output() -> None:
+    result = {
+        "text": "the answer",
+        "tool_calls": None,
+        "finish_reason": "stop",
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+        "reasoning_items": [
+            {"id": "rs_1", "encrypted_content": "enc_1", "summary": []},
+        ],
+    }
+
+    resp = openai_result_to_responses(result, model="jetbrains:gpt-6-astra")
+
+    assert resp["output"][0]["type"] == "reasoning"
+    assert resp["output"][0]["id"] == "rs_1"
+    assert resp["output"][0]["encrypted_content"] == "enc_1"
+    assert resp["output"][0]["summary"] == []
+    assert resp["output"][1]["type"] == "message"
+    assert resp["output"][1]["content"][0]["text"] == "the answer"
+
+
+def test_stream_emits_reasoning_item_before_text() -> None:
+    state = ResponsesStreamState(response_id="resp_r", model="jetbrains:gpt-6-astra")
+    chunks = state.on_event(
+        {
+            "delta_text": "",
+            "reasoning_items": [
+                {"id": "rs_1", "encrypted_content": "enc_1", "summary": []}
+            ],
+            "finish_reason": None,
+            "usage": None,
+        }
+    )
+    chunks.extend(
+        state.on_event({"delta_text": "hi", "finish_reason": None, "usage": None})
+    )
+    chunks.extend(state.finalize())
+
+    frames = _parse_sse_frames(chunks)
+    names = [name for name, _ in frames]
+    added_index = names.index("response.output_item.added")
+    done_index = names.index("response.output_item.done")
+    assert frames[added_index][1]["item"]["type"] == "reasoning"
+    assert frames[done_index][1]["item"]["encrypted_content"] == "enc_1"
+    assert added_index < names.index("response.output_text.delta")
+
+    completed = frames[-1][1]["response"]
+    assert completed["output"][0]["type"] == "reasoning"
+    assert completed["output"][1]["type"] == "message"
+
+    history = state.assistant_turn_message()
+    assert history["thinking_blocks"][0]["type"] == "reasoning_item"
+    assert history["thinking_blocks"][0]["id"] == "rs_1"

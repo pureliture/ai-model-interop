@@ -156,6 +156,7 @@ def responses_input_to_messages(
     messages: list[dict[str, Any]] = []
     inferred_custom_tools: set[str] = set()
     system_parts: list[str] = []
+    pending_reasoning: list[dict[str, Any]] = []
     saw_conversation_turn = False
 
     if instructions is not None:
@@ -208,6 +209,26 @@ def responses_input_to_messages(
             continue
 
         if item_type == "reasoning":
+            from openai_compatible_bridge.core.features import reasoning_replay_enabled
+
+            if not reasoning_replay_enabled():
+                continue
+            item_id = item.get("id")
+            encrypted = item.get("encrypted_content")
+            if not item_id and not encrypted:
+                raise ResponsesBadRequest(
+                    f"input[{index}] (reasoning) requires id or encrypted_content.",
+                    param=f"input[{index}]",
+                )
+            summary = item.get("summary")
+            pending_reasoning.append(
+                {
+                    "type": "reasoning_item",
+                    "id": str(item_id) if item_id else None,
+                    "encrypted_content": encrypted if isinstance(encrypted, str) else None,
+                    "summary": summary if isinstance(summary, list) else [],
+                }
+            )
             continue
 
         if item_type in ("function_call", "custom_tool_call"):
@@ -247,6 +268,7 @@ def responses_input_to_messages(
             }
             if messages and messages[-1].get("role") == "assistant":
                 messages[-1].setdefault("tool_calls", []).append(tc_entry)
+                target = messages[-1]
             else:
                 messages.append(
                     {
@@ -255,6 +277,10 @@ def responses_input_to_messages(
                         "tool_calls": [tc_entry],
                     }
                 )
+                target = messages[-1]
+            if pending_reasoning:
+                target.setdefault("thinking_blocks", []).extend(pending_reasoning)
+                pending_reasoning.clear()
             continue
 
         if item_type in ("function_call_output", "custom_tool_call_output"):
@@ -272,6 +298,7 @@ def responses_input_to_messages(
             }
             if item.get("is_error") is True:
                 tool_msg["is_error"] = True
+            pending_reasoning.clear()
             messages.append(tool_msg)
             continue
 
@@ -320,7 +347,15 @@ def responses_input_to_messages(
             else:
                 content = _extract_responses_content_text(content)
             saw_conversation_turn = True
-            messages.append({"role": effective_role, "content": content})
+            if effective_role == "assistant":
+                entry: dict[str, Any] = {"role": "assistant", "content": content}
+                if pending_reasoning:
+                    entry["thinking_blocks"] = list(pending_reasoning)
+                    pending_reasoning.clear()
+                messages.append(entry)
+            else:
+                pending_reasoning.clear()
+                messages.append({"role": effective_role, "content": content})
             continue
 
         raise ResponsesBadRequest(
@@ -627,6 +662,13 @@ def build_assistant_history_message(result: dict[str, Any]) -> dict[str, Any]:
     }
     if tool_calls:
         msg["tool_calls"] = tool_calls
+    reasoning_items = result.get("reasoning_items")
+    if isinstance(reasoning_items, list) and reasoning_items:
+        msg["thinking_blocks"] = [
+            {**item, "type": "reasoning_item"}
+            for item in reasoning_items
+            if isinstance(item, dict)
+        ]
     return msg
 
 
@@ -705,6 +747,20 @@ def openai_result_to_responses(
     finish_reason = result.get("finish_reason") or "stop"
 
     output_items: list[dict[str, Any]] = []
+    from openai_compatible_bridge.core.features import reasoning_replay_enabled
+
+    for item in (result.get("reasoning_items") or []) if reasoning_replay_enabled() else []:
+        if not isinstance(item, dict):
+            continue
+        reason_item: dict[str, Any] = {
+            "id": item.get("id") or f"rs_{uuid.uuid4().hex[:24]}",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": item.get("summary") if isinstance(item.get("summary"), list) else [],
+        }
+        if isinstance(item.get("encrypted_content"), str) and item["encrypted_content"]:
+            reason_item["encrypted_content"] = item["encrypted_content"]
+        output_items.append(reason_item)
     if text or not tool_calls:
         output_items.append(
             {
@@ -910,6 +966,42 @@ class ResponsesStreamState:
 
     def on_event(self, event: dict[str, Any]) -> list[str]:
         out = self._ensure_start()
+        from openai_compatible_bridge.core.features import reasoning_replay_enabled
+
+        for item in (event.get("reasoning_items") or []) if reasoning_replay_enabled() else []:
+            if not isinstance(item, dict):
+                continue
+            reason_id = str(item.get("id") or f"rs_{uuid.uuid4().hex[:24]}")
+            summary = item.get("summary") if isinstance(item.get("summary"), list) else []
+            output_index = len(self.completed_items)
+            added_item = {
+                "id": reason_id,
+                "type": "reasoning",
+                "status": "in_progress",
+                "summary": summary,
+            }
+            done_item = {
+                "id": reason_id,
+                "type": "reasoning",
+                "status": "completed",
+                "summary": summary,
+            }
+            encrypted = item.get("encrypted_content")
+            if isinstance(encrypted, str) and encrypted:
+                done_item["encrypted_content"] = encrypted
+            self.completed_items.append(done_item)
+            out.append(
+                responses_sse_event(
+                    "response.output_item.added",
+                    {"output_index": output_index, "item": added_item},
+                )
+            )
+            out.append(
+                responses_sse_event(
+                    "response.output_item.done",
+                    {"output_index": output_index, "item": done_item},
+                )
+            )
         delta_text = event.get("delta_text", "")
         if delta_text is None:
             delta_text = ""
@@ -1144,4 +1236,11 @@ class ResponsesStreamState:
         }
         if tool_calls:
             msg["tool_calls"] = tool_calls
+        reasoning = [
+            {**item, "type": "reasoning_item"}
+            for item in self.completed_items
+            if isinstance(item, dict) and item.get("type") == "reasoning"
+        ]
+        if reasoning:
+            msg["thinking_blocks"] = reasoning
         return msg

@@ -90,6 +90,42 @@ def test_jetbrains_alias_routes_non_stream() -> None:
         _restore_registry(old_registry)
 
 
+def test_jetbrains_drops_replayed_reasoning_content() -> None:
+    old_registry = _register_jetbrains_alias()
+    try:
+        fake = _FakeJetBrains()
+        app = create_app(
+            embedding_client_factory=_FakeProvider,
+            chat_client_factory=_FakeProvider,
+            rerank_client_factory=_FakeProvider,
+            ollama_chat_client_factory=_FakeProvider,
+            foundry_chat_client_factory=_FakeProvider,
+            jetbrains_chat_client_factory=lambda: fake,
+            cost_accounting_factory=lambda: None,
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "jetbrains:openai-gpt-5-4",
+                    "messages": [
+                        {"role": "user", "content": "hi"},
+                        {
+                            "role": "assistant",
+                            "content": "hello",
+                            "reasoning_content": "replayed private reasoning",
+                        },
+                        {"role": "user", "content": "again"},
+                    ],
+                },
+            )
+            assert response.status_code == 200
+            assert fake.calls
+            assert all("reasoning_content" not in m for m in fake.calls[0]["messages"])
+    finally:
+        _restore_registry(old_registry)
+
+
 def test_jetbrains_alias_streams() -> None:
     old_registry = _register_jetbrains_alias()
     try:

@@ -348,6 +348,9 @@ class JetBrainsChatClient:
             body["stop"] = stop
         if reasoning_effort is not None:
             body["reasoning"] = {"effort": reasoning_effort}
+        if protocol == JETBRAINS_OPENAI_PROTOCOL:
+            # Stateless replay needs the encrypted reasoning payload the gateway omits by default.
+            body["include"] = ["reasoning.encrypted_content"]
         if response_format is not None:
             format_type = response_format.get("type")
             if format_type == "json_object":
@@ -740,8 +743,25 @@ class JetBrainsChatClient:
             # OpenAI Responses API → OpenAI Chat Completions format
             text = _xai_text(payload)
             tool_calls = None
+            reasoning_items: list[dict[str, Any]] = []
             for item in payload.get("output", []) or []:
-                if isinstance(item, dict) and item.get("type") == "function_call":
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "reasoning":
+                    reason: dict[str, Any] = {
+                        "type": "reasoning",
+                        "summary": item.get("summary") if isinstance(item.get("summary"), list) else [],
+                    }
+                    if item.get("id"):
+                        reason["id"] = str(item["id"])
+                    encrypted = item.get("encrypted_content")
+                    if isinstance(encrypted, str) and encrypted:
+                        reason["encrypted_content"] = encrypted
+                    if isinstance(item.get("status"), str) and item["status"]:
+                        reason["status"] = item["status"]
+                    if reason.get("id") or reason.get("encrypted_content"):
+                        reasoning_items.append(reason)
+                elif item.get("type") == "function_call":
                     if tool_calls is None:
                         tool_calls = []
                     tool_calls.append({
@@ -762,6 +782,7 @@ class JetBrainsChatClient:
                     "completion_tokens": int(usage.get("output_tokens", 0) or 0),
                     "total_tokens": int(usage.get("total_tokens", 0) or 0) or (int(usage.get("input_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0)),
                 },
+                **( {"reasoning_items": reasoning_items} if reasoning_items else {} ),
             }
 
     async def stream_chat(
