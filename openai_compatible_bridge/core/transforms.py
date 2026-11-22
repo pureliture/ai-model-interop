@@ -201,6 +201,31 @@ def _xai_text(payload: Any) -> str:
     return "".join(parts)
 
 
+def _reasoning_input_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Opaque reasoning items replayed ahead of the assistant turn they belong to."""
+    from openai_compatible_bridge.core.features import reasoning_replay_enabled
+
+    if not reasoning_replay_enabled():
+        return []
+    items: list[dict[str, Any]] = []
+    for item in message.get("thinking_blocks") or []:
+        if not isinstance(item, dict) or item.get("type") != "reasoning_item":
+            continue
+        item_id = item.get("id")
+        encrypted = item.get("encrypted_content")
+        if not item_id and not encrypted:
+            continue
+        out: dict[str, Any] = {"type": "reasoning"}
+        if item_id:
+            out["id"] = str(item_id)
+        if encrypted:
+            out["encrypted_content"] = str(encrypted)
+        summary = item.get("summary")
+        out["summary"] = summary if isinstance(summary, list) else []
+        items.append(out)
+    return items
+
+
 def _xai_input_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Transform message history into xAI Responses input items sequence."""
     input_items: list[dict[str, Any]] = []
@@ -224,6 +249,7 @@ def _xai_input_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 }
             )
         elif role == "assistant":
+            input_items.extend(_reasoning_input_items(message))
             if content:
                 text = _extract_message_text(content)
                 if text:

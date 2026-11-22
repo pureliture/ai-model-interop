@@ -387,6 +387,12 @@ def _normalize_chat_message(m: OpenAIChatMessage) -> dict[str, Any]:
         msg["name"] = m.name
     extra = getattr(m, "__pydantic_extra__", None) or {}
     for k, v in extra.items():
+        # reasoning_content는 Chat Completions 입력 계약의 필드가 아니다. 클라이언트가
+        # 이전 assistant 턴의 추론을 그대로 되돌려 보내는 경우가 있는데, Responses/
+        # Anthropic/Google 프로토콜은 이를 표현할 수 없고 일부 upstream은 입력에서
+        # 거부한다(DeepSeek 400). 업스트림으로 전달하지 않고 경계에서 버린다.
+        if k == "reasoning_content":
+            continue
         if k not in msg and v is not None:
             msg[k] = v
     return msg
@@ -1492,6 +1498,15 @@ def _chat_completions_stream(
                     thinking_blocks = event.get("thinking_blocks")
                     if thinking_blocks:
                         delta["thinking_blocks"] = thinking_blocks
+                    reasoning_items = event.get("reasoning_items")
+                    if reasoning_items:
+                        blocks = list(delta.get("thinking_blocks") or [])
+                        blocks.extend(
+                            {**item, "type": "reasoning_item"}
+                            for item in reasoning_items
+                            if isinstance(item, dict)
+                        )
+                        delta["thinking_blocks"] = blocks
 
                     if delta:
                         yield _chunk(delta, None)
@@ -1820,6 +1835,14 @@ async def create_chat_completions(
                 choice_message["tool_calls"] = result["tool_calls"]
             if result.get("thinking_blocks"):
                 choice_message["thinking_blocks"] = result["thinking_blocks"]
+            if result.get("reasoning_items"):
+                blocks = list(choice_message.get("thinking_blocks") or [])
+                blocks.extend(
+                    {**item, "type": "reasoning_item"}
+                    for item in result["reasoning_items"]
+                    if isinstance(item, dict)
+                )
+                choice_message["thinking_blocks"] = blocks
 
             return {
                 "id": _new_chat_completion_id(),

@@ -7,6 +7,7 @@ import sys
 from typing import Any
 import httpx
 
+from openai_compatible_bridge.core.features import reasoning_replay_enabled
 from openai_compatible_bridge.core.transforms import (
     _anthropic_usage, _append_anthropic_turn, _clamp_xai_reasoning_effort, _google_contents_and_system,
     _google_json_object, _google_response_result, _google_tool_config, _google_tools,
@@ -34,6 +35,23 @@ def _stream_error_detail(exc: BaseException) -> str:
     kind = type(exc).__name__
     text = " ".join(_STREAM_SECRET_RE.sub("[redacted]", str(exc)).split())[:200]
     return f"{kind}: {text}" if text else kind
+
+
+def _reasoning_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Normalize an upstream reasoning output item for opaque replay."""
+    out: dict[str, Any] = {"type": "reasoning"}
+    item_id = item.get("id")
+    if item_id:
+        out["id"] = str(item_id)
+    encrypted = item.get("encrypted_content")
+    if isinstance(encrypted, str) and encrypted:
+        out["encrypted_content"] = encrypted
+    summary = item.get("summary")
+    out["summary"] = summary if isinstance(summary, list) else []
+    status = item.get("status")
+    if isinstance(status, str) and status:
+        out["status"] = status
+    return out
 
 
 class ProtocolStream:
@@ -561,6 +579,7 @@ class ProtocolStream:
                 delta_text = ""
                 delta_tool_calls: list[dict[str, Any]] | None = None
                 delta_thinking_blocks: list[dict[str, Any]] | None = None
+                delta_reasoning_items: list[dict[str, Any]] = []
                 finish_reason: str | None = None
                 normalized_usage: dict[str, int] | None = None
                 google_native_parts = None
@@ -814,7 +833,11 @@ class ProtocolStream:
                         saw_tool_calls = True
                     elif event_type == "response.output_item.done":
                         item = event.get("item", {}) or {}
-                        if item.get("type") == "function_call":
+                        if reasoning_replay_enabled() and item.get("type") == "reasoning":
+                            normalized = _reasoning_item(item)
+                            if normalized.get("id") or normalized.get("encrypted_content"):
+                                delta_reasoning_items.append(normalized)
+                        elif item.get("type") == "function_call":
                             call_id = item.get("call_id") or item.get("id") or ""
                             item_id = item.get("id") or ""
                             output_index = event.get("output_index")
@@ -891,6 +914,7 @@ class ProtocolStream:
                         )
 
                 if (delta_text or delta_tool_calls or delta_thinking_blocks
+                        or delta_reasoning_items
                         or finish_reason is not None or normalized_usage is not None):
                     event_dict: dict[str, Any] = {
                         "delta_text": delta_text,
@@ -901,6 +925,8 @@ class ProtocolStream:
                         event_dict["delta_tool_calls"] = delta_tool_calls
                     if delta_thinking_blocks:
                         event_dict["thinking_blocks"] = delta_thinking_blocks
+                    if delta_reasoning_items:
+                        event_dict["reasoning_items"] = delta_reasoning_items
                     if google_native_parts:
                         event_dict["_google_call_parts"] = google_native_parts
                     yield event_dict
@@ -1019,11 +1045,16 @@ class ProtocolStream:
 
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
+        reasoning_items: list[dict[str, Any]] = []
         for item in output_list:
             if not isinstance(item, dict):
                 continue
             itype = item.get("type")
-            if itype == "message":
+            if reasoning_replay_enabled() and itype == "reasoning":
+                normalized = _reasoning_item(item)
+                if normalized.get("id") or normalized.get("encrypted_content"):
+                    reasoning_items.append(normalized)
+            elif itype == "message":
                 for c in item.get("content", []) or []:
                     if isinstance(c, dict) and c.get("type") == "output_text":
                         text_parts.append(str(c.get("text", "")))
@@ -1082,4 +1113,5 @@ class ProtocolStream:
             "tool_calls": tool_calls if tool_calls else None,
             "finish_reason": finish_reason,
             "usage": usage,
+            "reasoning_items": reasoning_items or None,
         }

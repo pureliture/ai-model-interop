@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -191,3 +192,184 @@ def test_google_tool_schema_normalizes_union_types():
     assert schema["properties"]["skip"] == {"type": "number", "nullable": True}
     assert schema["properties"]["mode"]["anyOf"] == [{"type": "string"}, {"type": "integer"}]
     assert "additionalProperties" not in schema
+
+
+def _run_jetbrains(handler, *, protocol, stream, messages, model="native") -> Any:
+    async def run():
+        client = JetBrainsChatClient(base_url="https://example.test", token="synthetic")
+        await client.http.aclose()
+        client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            args = dict(
+                model=model,
+                messages=messages,
+                resolved_config={"protocol": protocol},
+            )
+            if stream:
+                return [event async for event in client.stream_chat(**args)]
+            return await client.generate(**args)
+        finally:
+            await client.close()
+
+    return asyncio.run(run())
+
+
+def test_include_reasoning_encrypted_content_only_for_openai_responses() -> None:
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "completed", "output": []})
+
+    _run_jetbrains(
+        handler,
+        protocol="openai_responses",
+        stream=False,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    body = json.loads(requests[0].content)
+    assert body["include"] == ["reasoning.encrypted_content"]
+
+
+def test_reasoning_item_capture_stream_and_non_stream() -> None:
+    reasoning = {
+        "id": "rs_1",
+        "type": "reasoning",
+        "status": "completed",
+        "summary": [],
+        "encrypted_content": "enc_full",
+    }
+    payload = {
+        "status": "completed",
+        "output": [
+            reasoning,
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}],
+            },
+        ],
+    }
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    result = _run_jetbrains(
+        handler,
+        protocol="openai_responses",
+        stream=False,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert result["reasoning_items"] == [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "status": "completed",
+         "encrypted_content": "enc_full"}
+    ]
+
+    events = [
+        {"type": "response.output_item.done", "item": reasoning},
+        {"type": "response.output_text.delta", "delta": "hi"},
+        {"type": "response.completed", "response": {"status": "completed", "output": []}},
+    ]
+
+    def stream_handler(request):
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+
+    streamed = _run_jetbrains(
+        stream_handler,
+        protocol="openai_responses",
+        stream=True,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    items = [item for event in streamed for item in (event.get("reasoning_items") or [])]
+    assert items == [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "status": "completed",
+         "encrypted_content": "enc_full"}
+    ]
+
+
+def test_reasoning_item_replayed_before_assistant_turn() -> None:
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "completed", "output": []})
+
+    _run_jetbrains(
+        handler,
+        protocol="openai_responses",
+        stream=False,
+        messages=[
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "hello",
+                "thinking_blocks": [
+                    {"type": "reasoning_item", "id": "rs_1", "encrypted_content": "enc_1", "summary": []}
+                ],
+            },
+            {"role": "user", "content": "again"},
+        ],
+    )
+    body = json.loads(requests[0].content)
+    input_items = body["input"]
+    reasoning_index = next(i for i, item in enumerate(input_items) if item.get("type") == "reasoning")
+    assistant_index = next(i for i, item in enumerate(input_items) if item.get("role") == "assistant")
+    assert reasoning_index < assistant_index
+    assert input_items[reasoning_index] == {
+        "type": "reasoning",
+        "id": "rs_1",
+        "encrypted_content": "enc_1",
+        "summary": [],
+    }
+
+
+def test_reasoning_replay_kill_switch(monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_REASONING_REPLAY", "0")
+    reasoning = {
+        "id": "rs_off",
+        "type": "reasoning",
+        "status": "completed",
+        "summary": [],
+        "encrypted_content": "enc_off",
+    }
+    events = [
+        {"type": "response.output_item.done", "item": reasoning},
+        {"type": "response.completed", "response": {"status": "completed", "output": []}},
+    ]
+
+    def stream_handler(request):
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+
+    streamed = _run_jetbrains(
+        stream_handler,
+        protocol="openai_responses",
+        stream=True,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert [item for event in streamed for item in (event.get("reasoning_items") or [])] == []
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "completed", "output": []})
+
+    _run_jetbrains(
+        handler,
+        protocol="openai_responses",
+        stream=False,
+        messages=[
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "hello",
+                "thinking_blocks": [
+                    {"type": "reasoning_item", "id": "rs_1", "encrypted_content": "enc_1", "summary": []}
+                ],
+            },
+        ],
+    )
+    body = json.loads(requests[0].content)
+    assert all(item.get("type") != "reasoning" for item in body["input"])
