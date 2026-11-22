@@ -146,3 +146,8 @@
 - 로컬 브릿지 `/v1/responses` 2턴 검증(2026-11-22):
   - 1턴: 출력 항목 `["reasoning", "message"]`, reasoning ID 있음, `encrypted_content` 2,616자, summary 빈 배열, 답변 "8".
   - 2턴: 같은 추론 항목을 입력으로 재전송 → 200, 답변 "9". 재전송 항목에 `summary: []`가 포함되지 않으면 업스트림이 400을 낸다.
+- OMP 종단 검증(2026-11-22):
+  - OMP 제공자를 `api: openai-responses`, baseUrl `http://127.0.0.1:18123/v1`로 전환.
+  - OMP 요청: `reasoning.effort=high`, `store=false`, `include=["reasoning.encrypted_content"]`.
+  - 도구 호출 후속 요청 입력에 `reasoning` 항목이 `encrypted_content`와 함께 포함됨을 확인. 이 항목에는 `id`가 없고 `summary`만 있으며, 브릿지는 암호문 기준으로 수용한다.
+  - 해당 요청 200, OMP 답변 정상. 도구 호출 전후 추론 항목의 저장·재전송이 실제로 일어난다.
