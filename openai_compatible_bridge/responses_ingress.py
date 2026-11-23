@@ -329,11 +329,14 @@ def responses_input_to_messages(
                         if extra:
                             field = sorted(extra)[0]
                             raise ResponsesBadRequest(f"{path}.{field} cannot be represented in chat protocol.", param=f"{path}.{field}")
+                        if "file_id" in block and not block.get("image_url"):
+                            raise ResponsesBadRequest(
+                                f"{path}.file_id cannot be represented in chat protocol.",
+                                param=f"{path}.file_id",
+                            )
                         image = {"type": "image_url", "image_url": {"url": block.get("image_url")}}
-                        if "detail" in block:
-                            image["image_url"]["detail"] = block["detail"]
-                        if "file_id" in block:
-                            image["file_id"] = block["file_id"]
+                        # `detail` and `file_id` are accepted for replay compatibility
+                        # but cannot be represented in the outgoing chat protocol.
                         mapped.append(image)
                         has_image = True
                     elif isinstance(block, dict) and block.get("type") in {"input_text", "output_text", "text"}:
