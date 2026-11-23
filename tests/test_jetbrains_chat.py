@@ -613,7 +613,6 @@ def test_non_jetbrains_image_builders_preserve_base64():
 @pytest.mark.parametrize("endpoint,payload,field", [
     ("/v1/responses", {"input": [{"role": "developer", "content": "rules"}]}, "role"),
     ("/v1/responses", {"input": [{"role": "user", "content": [{"type": "input_image", "file_id": "file-1"}]}]}, "file_id"),
-    ("/v1/responses", {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,YQ==", "detail": "auto"}]}]}, "detail"),
     ("/v1/messages", {"max_tokens": 16, "messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": "https://example.org/a"}}]}]}, "source"),
 ])
 def test_non_jetbrains_ingresses_reject_before_stream(endpoint, payload, field):

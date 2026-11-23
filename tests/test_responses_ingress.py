@@ -7,6 +7,7 @@ import json
 import pytest
 
 from openai_compatible_bridge.core.conversation_state import ConversationStateCache
+from openai_compatible_bridge.core.images import validate_messages
 from openai_compatible_bridge.responses_ingress import (
     ResponsesBadRequest,
     ResponsesStreamState,
@@ -114,6 +115,78 @@ def test_parse_responses_instructions_developer_and_history_items() -> None:
         "content": "UserService.py\n",
     }
     assert messages[5] == {"role": "developer", "content": "Mid-turn environment update"}
+
+
+def test_parse_responses_replayed_assistant_status_is_ignored() -> None:
+    params = parse_responses_chat_params(
+        {
+            "model": "jetbrains:gpt-6.1-terra",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done"}],
+                },
+                {"type": "message", "role": "user", "content": "next"},
+            ],
+        }
+    )
+
+    assert params["messages"] == [
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "next"},
+    ]
+
+
+def test_parse_responses_replayed_output_text_annotations_are_ignored() -> None:
+    params = parse_responses_chat_params(
+        {
+            "model": "jetbrains:gpt-6.1-terra",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "done", "annotations": []}
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert params["messages"] == [{"role": "assistant", "content": "done"}]
+
+
+def test_parse_responses_input_image_detail_and_file_id_are_dropped() -> None:
+    params = parse_responses_chat_params(
+        {
+            "model": "jetbrains:gpt-6.1-terra",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,YQ==",
+                            "detail": "auto",
+                            "file_id": "file-1",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert params["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}}
+            ],
+        }
+    ]
+    validate_messages(params["messages"], "jetbrains", "openai_responses")
 
 
 def test_parse_responses_flat_and_custom_tools_and_reverse_mapping() -> None:
