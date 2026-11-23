@@ -116,6 +116,28 @@ def test_parse_responses_instructions_developer_and_history_items() -> None:
     assert messages[5] == {"role": "developer", "content": "Mid-turn environment update"}
 
 
+def test_parse_responses_replayed_assistant_status_is_ignored() -> None:
+    params = parse_responses_chat_params(
+        {
+            "model": "jetbrains:gpt-6.1-terra",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done"}],
+                },
+                {"type": "message", "role": "user", "content": "next"},
+            ],
+        }
+    )
+
+    assert params["messages"] == [
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "next"},
+    ]
+
+
 def test_parse_responses_flat_and_custom_tools_and_reverse_mapping() -> None:
     params = parse_responses_chat_params(
         {

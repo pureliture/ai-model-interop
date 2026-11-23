@@ -309,7 +309,9 @@ def responses_input_to_messages(
                     f"Unsupported message role in input[{index}]: {effective_role!r}.",
                     param=f"input[{index}].role",
                 )
-            extra = set(item) - {"type", "role", "content"}
+            # Responses output items carry `status`; replayed history echoes it on
+            # message items even though the chat protocol has no such field.
+            extra = set(item) - {"type", "role", "content", "status"}
             if extra:
                 field = sorted(extra)[0]
                 raise ResponsesBadRequest(
