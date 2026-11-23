@@ -138,6 +138,25 @@ def test_parse_responses_replayed_assistant_status_is_ignored() -> None:
     ]
 
 
+def test_parse_responses_replayed_output_text_annotations_are_ignored() -> None:
+    params = parse_responses_chat_params(
+        {
+            "model": "jetbrains:gpt-6.1-terra",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "done", "annotations": []}
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert params["messages"] == [{"role": "assistant", "content": "done"}]
+
+
 def test_parse_responses_flat_and_custom_tools_and_reverse_mapping() -> None:
     params = parse_responses_chat_params(
         {

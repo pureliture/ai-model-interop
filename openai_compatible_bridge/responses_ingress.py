@@ -337,7 +337,9 @@ def responses_input_to_messages(
                         mapped.append(image)
                         has_image = True
                     elif isinstance(block, dict) and block.get("type") in {"input_text", "output_text", "text"}:
-                        extra = block.keys() - {"type", "text"}
+                        # `annotations` is output-only metadata echoed by replayed
+                        # Responses items; the chat protocol has no equivalent.
+                        extra = block.keys() - {"type", "text", "annotations"}
                         if extra:
                             field = sorted(extra)[0]
                             path = f"input[{index}].content[{block_index}].{field}"
